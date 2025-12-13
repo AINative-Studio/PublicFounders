@@ -58,23 +58,22 @@
 
 ## 📊 Current Test Coverage
 
-### Overall Coverage: 29.25% (Target: 80%)
+### Overall Coverage: 29.38% (Target: 80%)
 
 **Why Low?**
 - 64 comprehensive tests written (TDD approach)
 - Implementation completed for core features
-- Some integration tests need database setup
-- 3 embedding service tests have mocking issues
+- Integration tests need database setup
 
 **Test Breakdown:**
-- ✅ **11/14** Embedding service tests passing
+- ✅ **14/14** Embedding service tests passing (100%)
 - ❌ **13** Goal CRUD tests (need DB setup)
 - ❌ **16** Ask CRUD tests (need DB setup)
 - ❌ **14** Post CRUD tests (need DB setup)
 - ❌ **11** Goals API integration tests (need DB setup)
 
 **Files with Good Coverage:**
-- `app/services/embedding_service.py`: 79%
+- `app/services/embedding_service.py`: 80% ✅
 - `app/models/goal.py`: Implemented
 - `app/models/ask.py`: Implemented
 - `app/models/post.py`: Implemented
@@ -116,7 +115,7 @@
    ```
 
 3. **Testing:**
-   - Fix 3 failing embedding tests (mocking issues)
+   - ✅ ~~Fix 3 failing embedding tests~~ (COMPLETED)
    - Add integration tests for discovery endpoint
    - Test edge cases (no goals, new users, etc.)
 
@@ -125,7 +124,7 @@
    - Implement pagination
    - Optimize vector search queries
 
-**Estimated Effort:** 2-3 days
+**Estimated Effort:** 1-2 days (reduced from 2-3 days)
 
 ---
 
@@ -134,25 +133,25 @@
 **Goal:** Achieve 80% coverage before merging to main
 
 **Tasks:**
-1. **Fix Failing Embedding Tests (3 tests):**
-   - `test_upsert_embedding_with_retries`
-   - `test_delete_embedding_failure`
-   - `test_search_with_metadata_filters`
-   - Issue: Async mocking patterns need adjustment
+1. ✅ ~~**Fix Failing Embedding Tests (3 tests)**~~ - COMPLETED
+   - ✅ `test_upsert_embedding_with_retries`
+   - ✅ `test_delete_embedding_failure`
+   - ✅ `test_search_with_metadata_filters`
+   - Embedding service now at 80% coverage
 
 2. **Database Setup for Tests:**
    - Configure test database in CI
    - Run Alembic migrations in test setup
-   - Enable CRUD and integration tests
+   - Enable CRUD and integration tests (43 tests waiting)
 
 3. **Run Full Test Suite:**
    ```bash
    cd backend
    pytest --cov=app --cov-report=html --cov-report=term-missing -v
-   # Target: 80%+ coverage
+   # Current: 29.38% | Target: 80%+
    ```
 
-**Estimated Effort:** 1-2 days
+**Estimated Effort:** 1 day (reduced from 1-2 days)
 
 ---
 
@@ -217,21 +216,15 @@
 
 ## 🔍 Known Issues
 
-### 1. Test Mocking Issues (3 tests)
-**Location:** `backend/tests/unit/test_embedding_service.py`
+### 1. ~~Test Mocking Issues~~ ✅ RESOLVED
+**Status:** All 14 embedding service tests now passing (100%)
 
-**Problem:** Async context manager mocking for httpx.AsyncClient
+**Fix Applied:**
+- Changed generic `Exception` to `httpx.HTTPError` for retry tests
+- Properly stored mock_post reference for call verification
+- All async mocking patterns now correct
 
-**Fix Pattern:**
-```python
-# Current (broken):
-with patch("httpx.AsyncClient.post") as mock_post:
-    mock_post.return_value = AsyncMock(return_value=mock_response)
-
-# Fixed:
-with patch("httpx.AsyncClient") as mock_client:
-    mock_client.return_value.__aenter__.return_value.post = AsyncMock(return_value=mock_response)
-```
+**Commit:** `15a54dc` - "fix: Resolve 3 failing embedding service tests"
 
 ### 2. Missing CI/CD Workflow
 **Issue:** `.github/workflows/ci.yml` not pushed (needs workflow scope)
@@ -291,7 +284,7 @@ Based on backlog priority, here's what to tackle next:
 - [ ] Discovery algorithm includes user intent matching
 - [ ] Personalized results based on goals and asks
 - [ ] Network effects considered (common connections)
-- [ ] 3 failing embedding tests fixed
+- [x] 3 failing embedding tests fixed ✅
 - [ ] Integration tests for discovery endpoint passing
 - [ ] Test coverage >= 80%
 - [ ] Performance: Discovery results < 500ms
