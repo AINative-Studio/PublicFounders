@@ -29,6 +29,13 @@ from app.schemas.advisor_agent import (
     AgentActionRequest,
     AgentActionResponse
 )
+from app.schemas.introduction import (
+    IntroductionRequest,
+    IntroductionResponseRequest,
+    IntroductionCompletion,
+    IntroductionResponse,
+    IntroductionListResponse
+)
 
 __all__ = [
     "UserResponse",
@@ -51,4 +58,9 @@ __all__ = [
     "WeeklyOpportunitySummary",
     "AgentActionRequest",
     "AgentActionResponse",
+    "IntroductionRequest",
+    "IntroductionResponseRequest",
+    "IntroductionCompletion",
+    "IntroductionResponse",
+    "IntroductionListResponse",
 ]
