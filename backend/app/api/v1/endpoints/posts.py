@@ -14,15 +14,13 @@ Endpoints:
 import asyncio
 import logging
 import time
+import uuid as uuid_module
+from datetime import datetime
 from typing import Optional, List
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status, BackgroundTasks
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
-from app.core.database import get_db
 from app.models.user import User
-from app.models.post import Post, PostType
-from app.models.goal import Goal
+from app.models.post import PostType
 from app.schemas.post import (
     PostCreate,
     PostUpdate,
@@ -31,6 +29,7 @@ from app.schemas.post import (
     PostDiscoveryRequest,
     PostDiscoveryResponse
 )
+from app.services.zerodb_client import zerodb_client
 from app.services.embedding_service import embedding_service, EmbeddingServiceError
 from app.services.cache_service import cache_service
 from app.services.safety_service import safety_service
@@ -43,83 +42,86 @@ router = APIRouter(prefix="/posts", tags=["posts"])
 
 
 # TODO: Replace with actual auth dependency from Sprint 1
-async def get_current_user(db: AsyncSession = Depends(get_db)) -> User:
+async def get_current_user() -> User:
     """Mock auth dependency - replace with Sprint 1 implementation."""
-    result = await db.execute(select(User).limit(1))
-    user = result.scalar_one_or_none()
-    if not user:
+    users = await zerodb_client.query_rows(
+        table_name="users",
+        limit=1
+    )
+    if not users:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required"
         )
+    # Convert dict to User object for compatibility
+    user_data = users[0]
+    user = User()
+    user.id = UUID(user_data["id"])
+    user.name = user_data.get("name")
+    user.email = user_data.get("email")
     return user
 
 
-async def create_post_embedding_async(post_id: UUID, user_id: UUID, post_type: str, content: str, db_url: str):
+async def create_post_embedding_async(post_id: UUID, user_id: UUID, post_type: str, content: str):
     """
     Background task to create post embedding asynchronously.
 
     This function runs after the API response is sent, so embedding failures
     don't block the user experience.
     """
-    # Import here to avoid circular dependencies
-    from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-
     try:
-        # Create new DB session for background task
-        engine = create_async_engine(db_url)
-        async_session = async_sessionmaker(engine, expire_on_commit=False)
+        # Update post embedding status to processing
+        await zerodb_client.update_rows(
+            table_name="posts",
+            filter={"id": str(post_id)},
+            update={"$set": {
+                "embedding_status": "processing",
+                "updated_at": datetime.utcnow().isoformat()
+            }}
+        )
 
-        async with async_session() as session:
-            # Update post embedding status to processing
-            result = await session.execute(
-                select(Post).where(Post.id == post_id)
-            )
-            post = result.scalar_one_or_none()
+        # Create embedding
+        await embedding_service.create_post_embedding(
+            post_id=post_id,
+            user_id=user_id,
+            post_type=post_type,
+            content=content,
+            additional_metadata={}
+        )
 
-            if not post:
-                logger.error(f"Post {post_id} not found for embedding")
-                return
+        # Mark as completed
+        await zerodb_client.update_rows(
+            table_name="posts",
+            filter={"id": str(post_id)},
+            update={"$set": {
+                "embedding_status": "completed",
+                "embedding_created_at": datetime.utcnow().isoformat(),
+                "embedding_error": None,
+                "updated_at": datetime.utcnow().isoformat()
+            }}
+        )
 
-            post.embedding_status = "processing"
-            await session.commit()
-
-            # Create embedding
-            await embedding_service.create_post_embedding(
-                post_id=post_id,
-                user_id=user_id,
-                post_type=post_type,
-                content=content,
-                additional_metadata={}
-            )
-
-            # Mark as completed
-            post.mark_embedding_completed()
-            await session.commit()
-
-            logger.info(f"Successfully created post embedding for {post_id}")
+        logger.info(f"Successfully created post embedding for {post_id}")
 
     except EmbeddingServiceError as e:
         logger.error(f"Failed to create post embedding for {post_id}: {e}")
 
         # Update post with error
         try:
-            async with async_session() as session:
-                result = await session.execute(
-                    select(Post).where(Post.id == post_id)
-                )
-                post = result.scalar_one_or_none()
-                if post:
-                    post.mark_embedding_failed(str(e))
-                    await session.commit()
+            await zerodb_client.update_rows(
+                table_name="posts",
+                filter={"id": str(post_id)},
+                update={"$set": {
+                    "embedding_status": "failed",
+                    "embedding_error": str(e),
+                    "updated_at": datetime.utcnow().isoformat()
+                }}
+            )
         except Exception as update_error:
             logger.error(f"Failed to update post error status: {update_error}")
 
     except Exception as e:
         logger.error(f"Unexpected error creating post embedding: {e}")
-
-    finally:
-        await engine.dispose()
 
 
 @router.post(
@@ -132,7 +134,6 @@ async def create_post_embedding_async(post_id: UUID, user_id: UUID, post_type: s
 async def create_post(
     post_data: PostCreate,
     background_tasks: BackgroundTasks,
-    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ) -> PostResponse:
     """
@@ -174,28 +175,36 @@ async def create_post(
         # Log safety errors but don't block post creation
         logger.error(f"Safety check failed for post creation: {e}")
 
-    # Create post in database
-    post = Post(
-        user_id=current_user.id,
-        type=post_data.type,
-        content=post_data.content,
-        is_cross_posted=post_data.is_cross_posted
-    )
+    # Create post in ZeroDB
+    post_id = uuid_module.uuid4()
+    now = datetime.utcnow().isoformat()
 
-    db.add(post)
-    await db.commit()
-    await db.refresh(post)
+    post_data_dict = {
+        "id": str(post_id),
+        "user_id": str(current_user.id),
+        "type": post_data.type.value,
+        "content": post_data.content,
+        "is_cross_posted": post_data.is_cross_posted,
+        "embedding_status": "pending",
+        "embedding_created_at": None,
+        "embedding_error": None,
+        "created_at": now,
+        "updated_at": now
+    }
+
+    await zerodb_client.insert_rows(
+        table_name="posts",
+        rows=[post_data_dict]
+    )
 
     # Queue embedding creation as background task
     # This runs AFTER the response is sent, so it doesn't block the user
-    from app.core.config import settings
     background_tasks.add_task(
         create_post_embedding_async,
-        post_id=post.id,
+        post_id=post_id,
         user_id=current_user.id,
-        post_type=post.type.value,
-        content=post.content,
-        db_url=settings.DATABASE_URL
+        post_type=post_data.type.value,
+        content=post_data.content
     )
 
     # Invalidate discovery cache since new content affects all discovery results
@@ -203,9 +212,9 @@ async def create_post(
         cache_service.invalidate_all_cache
     )
 
-    logger.info(f"Created post {post.id}, embedding queued, cache invalidation scheduled")
+    logger.info(f"Created post {post_id}, embedding queued, cache invalidation scheduled")
 
-    return PostResponse.model_validate(post)
+    return PostResponse(**post_data_dict)
 
 
 @router.get(
@@ -219,7 +228,6 @@ async def list_posts(
     page_size: int = Query(20, ge=1, le=100, description="Items per page"),
     user_id: Optional[UUID] = Query(None, description="Filter by user"),
     post_type: Optional[PostType] = Query(None, description="Filter by type"),
-    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ) -> PostListResponse:
     """
@@ -229,32 +237,32 @@ async def list_posts(
     - Filter by user or post type
     - Orders by created_at desc
     """
-    # Build query
-    query = select(Post)
-
-    # Apply filters
+    # Build filter
+    filter_dict = {}
     if user_id is not None:
-        query = query.where(Post.user_id == user_id)
-
+        filter_dict["user_id"] = str(user_id)
     if post_type is not None:
-        query = query.where(Post.type == post_type)
+        filter_dict["type"] = post_type.value
 
-    # Get total count
-    count_query = select(func.count()).select_from(query.subquery())
-    total_result = await db.execute(count_query)
-    total = total_result.scalar()
+    # Get total count (query all matching to get count)
+    all_matching = await zerodb_client.query_rows(
+        table_name="posts",
+        filter=filter_dict,
+        limit=10000  # High limit to get all for counting
+    )
+    total = len(all_matching)
 
-    # Apply ordering and pagination
-    query = query.order_by(
-        Post.created_at.desc()
-    ).offset((page - 1) * page_size).limit(page_size)
-
-    # Execute query
-    result = await db.execute(query)
-    posts = result.scalars().all()
+    # Get paginated results with sorting
+    posts = await zerodb_client.query_rows(
+        table_name="posts",
+        filter=filter_dict,
+        limit=page_size,
+        offset=(page - 1) * page_size,
+        sort={"created_at": -1}  # -1 for descending order
+    )
 
     return PostListResponse(
-        posts=[PostResponse.model_validate(post) for post in posts],
+        posts=[PostResponse(**post) for post in posts],
         total=total,
         page=page,
         page_size=page_size,
@@ -270,7 +278,6 @@ async def list_posts(
 )
 async def discover_posts(
     discovery_params: PostDiscoveryRequest = Depends(),
-    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ) -> PostDiscoveryResponse:
     """
@@ -283,13 +290,13 @@ async def discover_posts(
     - Returns ranked posts with similarity scores
     """
     # Get user's active goals
-    result = await db.execute(
-        select(Goal).where(
-            Goal.user_id == current_user.id,
-            Goal.is_active == True
-        )
+    goals = await zerodb_client.query_rows(
+        table_name="goals",
+        filter={
+            "user_id": str(current_user.id),
+            "is_active": True
+        }
     )
-    goals = result.scalars().all()
 
     if not goals:
         # No active goals, return empty results
@@ -300,7 +307,7 @@ async def discover_posts(
         )
 
     # Extract goal descriptions
-    goal_descriptions = [goal.description for goal in goals]
+    goal_descriptions = [goal["description"] for goal in goals]
 
     # CACHE LOOKUP: Check if we have cached results
     cached_results = await cache_service.get_cached_discovery(
@@ -346,19 +353,26 @@ async def discover_posts(
 
         # Fetch posts from database
         if post_ids:
-            posts_result = await db.execute(
-                select(Post).where(Post.id.in_(post_ids))
-            )
-            posts = posts_result.scalars().all()
+            # Query posts by IDs - note: ZeroDB doesn't have native $in operator
+            # so we need to query individually or use a workaround
+            all_posts = []
+            for post_id in post_ids:
+                post_results = await zerodb_client.query_rows(
+                    table_name="posts",
+                    filter={"id": str(post_id)},
+                    limit=1
+                )
+                if post_results:
+                    all_posts.append(post_results[0])
 
             # Create a mapping for ordering
-            post_map = {post.id: post for post in posts}
+            post_map = {UUID(post["id"]): post for post in all_posts}
 
             # Reorder posts to match similarity order
             ordered_posts = [post_map[post_id] for post_id in post_ids if post_id in post_map]
 
             response_data = PostDiscoveryResponse(
-                posts=[PostResponse.model_validate(post) for post in ordered_posts],
+                posts=[PostResponse(**post) for post in ordered_posts],
                 similarity_scores=similarity_scores[:len(ordered_posts)],
                 total=len(ordered_posts)
             )
@@ -424,7 +438,6 @@ async def discover_posts(
 )
 async def track_post_view(
     post_id: UUID,
-    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ) -> None:
     """
@@ -435,10 +448,10 @@ async def track_post_view(
     - Returns 204 No Content on success
     """
     # Verify post exists
-    result = await db.execute(
-        select(Post).where(Post.id == post_id)
+    post = await zerodb_client.get_by_id(
+        table_name="posts",
+        id=str(post_id)
     )
-    post = result.scalar_one_or_none()
 
     if not post:
         raise HTTPException(
@@ -447,14 +460,14 @@ async def track_post_view(
         )
 
     # Get user's active goals for context
-    goals_result = await db.execute(
-        select(Goal).where(
-            Goal.user_id == current_user.id,
-            Goal.is_active == True
-        )
+    goals = await zerodb_client.query_rows(
+        table_name="goals",
+        filter={
+            "user_id": str(current_user.id),
+            "is_active": True
+        }
     )
-    goals = goals_result.scalars().all()
-    goal_descriptions = [goal.description for goal in goals]
+    goal_descriptions = [goal["description"] for goal in goals]
 
     # Track discovery interaction with click feedback
     try:
@@ -480,7 +493,6 @@ async def track_post_view(
 )
 async def get_post(
     post_id: UUID,
-    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ) -> PostResponse:
     """
@@ -489,10 +501,10 @@ async def get_post(
     - Any authenticated user can view posts (public feed)
     - Returns 404 if not found
     """
-    result = await db.execute(
-        select(Post).where(Post.id == post_id)
+    post = await zerodb_client.get_by_id(
+        table_name="posts",
+        id=str(post_id)
     )
-    post = result.scalar_one_or_none()
 
     if not post:
         raise HTTPException(
@@ -500,7 +512,7 @@ async def get_post(
             detail=f"Post {post_id} not found"
         )
 
-    return PostResponse.model_validate(post)
+    return PostResponse(**post)
 
 
 @router.put(
@@ -513,7 +525,6 @@ async def update_post(
     post_id: UUID,
     post_update: PostUpdate,
     background_tasks: BackgroundTasks,
-    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ) -> PostResponse:
     """
@@ -557,47 +568,67 @@ async def update_post(
             logger.error(f"Safety check failed for post update: {e}")
 
     # Fetch post
-    result = await db.execute(
-        select(Post).where(
-            Post.id == post_id,
-            Post.user_id == current_user.id
-        )
+    posts = await zerodb_client.query_rows(
+        table_name="posts",
+        filter={
+            "id": str(post_id),
+            "user_id": str(current_user.id)
+        },
+        limit=1
     )
-    post = result.scalar_one_or_none()
 
-    if not post:
+    if not posts:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Post {post_id} not found"
         )
 
+    post = posts[0]
+
     # Track if embedding needs update
     needs_embedding_update = False
 
-    # Update fields
-    update_data = post_update.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
-        if field in ["content", "type"]:
-            needs_embedding_update = True
-        setattr(post, field, value)
+    # Prepare update data
+    update_fields = post_update.model_dump(exclude_unset=True)
 
-    await db.commit()
-    await db.refresh(post)
+    # Convert enum to value if type is being updated
+    if "type" in update_fields:
+        update_fields["type"] = update_fields["type"].value
+        needs_embedding_update = True
+
+    if "content" in update_fields:
+        needs_embedding_update = True
+
+    # Add updated_at timestamp
+    update_fields["updated_at"] = datetime.utcnow().isoformat()
+
+    # Update in ZeroDB
+    await zerodb_client.update_rows(
+        table_name="posts",
+        filter={"id": str(post_id)},
+        update={"$set": update_fields}
+    )
+
+    # Get updated post
+    updated_posts = await zerodb_client.query_rows(
+        table_name="posts",
+        filter={"id": str(post_id)},
+        limit=1
+    )
+    updated_post = updated_posts[0]
 
     # Queue embedding update if needed (async)
     if needs_embedding_update:
-        from app.core.config import settings
         background_tasks.add_task(
             create_post_embedding_async,
-            post_id=post.id,
-            user_id=current_user.id,
-            post_type=post.type.value,
-            content=post.content,
-            db_url=settings.DATABASE_URL
+            post_id=UUID(updated_post["id"]),
+            user_id=UUID(updated_post["user_id"]),
+            post_type=updated_post["type"],
+            content=updated_post["content"]
         )
-        logger.info(f"Updated post {post.id}, embedding update queued")
+        logger.info(f"Updated post {post_id}, embedding update queued")
 
-    return PostResponse.model_validate(post)
+    return PostResponse(**updated_post)
 
 
 @router.delete(
@@ -608,7 +639,6 @@ async def update_post(
 )
 async def delete_post(
     post_id: UUID,
-    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ) -> None:
     """
@@ -619,24 +649,27 @@ async def delete_post(
     - Attempts to delete embedding from ZeroDB
     - Returns 204 on success
     """
-    # Fetch post
-    result = await db.execute(
-        select(Post).where(
-            Post.id == post_id,
-            Post.user_id == current_user.id
-        )
+    # Fetch post to verify ownership
+    posts = await zerodb_client.query_rows(
+        table_name="posts",
+        filter={
+            "id": str(post_id),
+            "user_id": str(current_user.id)
+        },
+        limit=1
     )
-    post = result.scalar_one_or_none()
 
-    if not post:
+    if not posts:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Post {post_id} not found"
         )
 
-    # Delete from database
-    await db.delete(post)
-    await db.commit()
+    # Delete from ZeroDB
+    await zerodb_client.delete_rows(
+        table_name="posts",
+        filter={"id": str(post_id)}
+    )
 
     # Attempt to delete embedding (don't fail if this errors)
     try:
