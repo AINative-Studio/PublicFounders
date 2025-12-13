@@ -2,3 +2,4 @@ PRD - I need to generate a detailed PRD for Social Network that is for foundsers
 Data Model - I need a detailed data model to align with this PRD for relational and vector
 Backlog - Give me a detailed agile backlog of Epics and User Stories aligned with this PRD, using our TDD and BDD methods
 SprintPlan - I need a detailed Agile Sprint Plan for this Backlog to build it today
+Agents- I need a list of seed phrases to seed claude code agents who are well versed in full stack softwaare development, ainative studio Apis, zerodb,  TDD, BDD, XP style programming, quantum computing, Design thinking, UI/UX expert, Agile Product owners
