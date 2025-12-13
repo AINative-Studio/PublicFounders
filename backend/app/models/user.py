@@ -82,6 +82,12 @@ class User(Base):
         back_populates="target",
         cascade="all, delete-orphan"
     )
+    advisor_agent = relationship(
+        "AdvisorAgent",
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:
         return f"<User(id={self.id}, name='{self.name}', linkedin_id='{self.linkedin_id}')>"

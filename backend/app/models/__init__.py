@@ -11,6 +11,7 @@ from app.models.ask import Ask, AskUrgency, AskStatus
 from app.models.post import Post, PostType
 from app.models.introduction import Introduction, IntroductionChannel, IntroductionStatus
 from app.models.interaction_outcome import InteractionOutcome, OutcomeType
+from app.models.advisor_agent import AgentStatus, MemoryType
 
 __all__ = [
     "User",
@@ -31,4 +32,6 @@ __all__ = [
     "IntroductionStatus",
     "InteractionOutcome",
     "OutcomeType",
+    "AgentStatus",
+    "MemoryType",
 ]

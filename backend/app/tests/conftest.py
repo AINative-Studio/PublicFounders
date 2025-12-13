@@ -153,3 +153,92 @@ def mock_embedding_vector():
     """Mock 1536-dimensional embedding vector"""
     import numpy as np
     return np.random.rand(1536).tolist()
+
+
+@pytest.fixture
+def sample_user_with_profile_and_agent_dict() -> tuple[dict, dict, dict]:
+    """Create a sample user with founder profile and advisor agent as dictionaries"""
+    from app.models.advisor_agent import AgentStatus
+
+    user_id = str(uuid.uuid4())
+    agent_id = str(uuid.uuid4())
+    profile_id = str(uuid.uuid4())
+    now = datetime.utcnow().isoformat()
+
+    user = {
+        "id": user_id,
+        "linkedin_id": "linkedin_agent_test",
+        "name": "Agent Test User",
+        "headline": "Founder Testing Agent",
+        "email": "agent.test@example.com",
+        "is_active": True,
+        "created_at": now,
+        "updated_at": now
+    }
+
+    profile = {
+        "id": profile_id,
+        "user_id": user_id,
+        "bio": "Testing advisor agent functionality",
+        "current_focus": "Building AI-powered features",
+        "autonomy_mode": AutonomyMode.SUGGEST.value,
+        "public_visibility": True,
+        "created_at": now,
+        "updated_at": now
+    }
+
+    agent = {
+        "id": agent_id,
+        "user_id": user_id,
+        "status": AgentStatus.ACTIVE.value,
+        "name": "Test Advisor",
+        "memory_namespace": f"agent_{user_id}",
+        "total_memories": 0,
+        "total_suggestions": 0,
+        "total_actions": 0,
+        "is_enabled": True,
+        "created_at": now,
+        "updated_at": now,
+        "last_memory_at": None,
+        "last_active_at": None,
+        "last_summary_at": None
+    }
+
+    return user, profile, agent
+
+
+@pytest.fixture
+def mock_zerodb_client():
+    """
+    Mock ZeroDB client for advisor agent testing
+    """
+    with patch('app.services.advisor_agent_service.zerodb_client') as mock:
+        mock.insert_rows = AsyncMock(return_value={"success": True, "inserted": 1})
+        mock.query_rows = AsyncMock(return_value=[])
+        mock.update_rows = AsyncMock(return_value={"success": True, "updated": 1})
+        mock.delete_rows = AsyncMock(return_value={"success": True, "deleted": 1})
+        mock.get_by_id = AsyncMock(return_value=None)
+        mock.get_by_field = AsyncMock(return_value=None)
+        yield mock
+
+
+@pytest.fixture
+def mock_zerodb_vector_service():
+    """
+    Mock ZeroDB vector service for advisor agent testing
+    """
+    with patch('app.services.advisor_agent_service.zerodb_service') as mock:
+        mock.upsert_vector = AsyncMock(return_value="vec_test_123")
+        mock.search_vectors = AsyncMock(return_value=[])
+        mock.prepare_metadata = lambda **kwargs: kwargs
+        yield mock
+
+
+@pytest.fixture
+def mock_embedding_service():
+    """
+    Mock embedding service for advisor agent testing
+    """
+    with patch('app.services.advisor_agent_service.embedding_service') as mock:
+        mock.generate_embedding = AsyncMock(return_value=[0.1] * 1536)
+        yield mock
