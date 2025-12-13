@@ -1,14 +1,14 @@
 """
-Integration Tests for Profile API
-Tests for founder profile CRUD endpoints
+Integration Tests for Profile API - ZeroDB Edition
+Tests for founder profile CRUD endpoints using ZeroDB
 """
 import pytest
 from httpx import AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession
+from unittest.mock import patch, AsyncMock
+import uuid
 
-from app.models.user import User
-from app.models.founder_profile import FounderProfile, AutonomyMode
 from app.core.security import create_access_token
+from app.core.enums import AutonomyMode
 
 
 @pytest.mark.integration
@@ -19,18 +19,24 @@ class TestGetMyProfile:
     async def test_get_my_profile_success(
         self,
         client: AsyncClient,
-        sample_user_with_profile
+        mock_zerodb,
+        sample_user_with_profile_dict
     ):
         """Test getting current user's profile with valid token"""
         # Arrange
-        user, profile = sample_user_with_profile
-        token = create_access_token({"sub": str(user.id), "linkedin_id": user.linkedin_id})
+        user, profile = sample_user_with_profile_dict
+        token = create_access_token({"sub": user["id"], "linkedin_id": user["linkedin_id"]})
+
+        mock_zerodb.get_by_id.return_value = user
+        mock_zerodb.query_rows.return_value = [profile]
 
         # Act
-        response = await client.get(
-            "/api/v1/profile/me",
-            headers={"Authorization": f"Bearer {token}"}
-        )
+        with patch('app.services.auth_service.zerodb_client', mock_zerodb):
+            with patch('app.services.profile_service.zerodb_client', mock_zerodb):
+                response = await client.get(
+                    "/api/v1/profile/me",
+                    headers={"Authorization": f"Bearer {token}"}
+                )
 
         # Assert
         assert response.status_code == 200
@@ -38,8 +44,8 @@ class TestGetMyProfile:
 
         assert "user" in data
         assert "profile" in data
-        assert data["user"]["id"] == str(user.id)
-        assert data["profile"]["user_id"] == str(user.id)
+        assert data["user"]["id"] == user["id"]
+        assert data["profile"]["user_id"] == user["id"]
 
     @pytest.mark.asyncio
     async def test_get_my_profile_unauthorized(self, client: AsyncClient):
@@ -71,48 +77,72 @@ class TestUpdateMyProfile:
     async def test_update_profile_bio(
         self,
         client: AsyncClient,
-        sample_user_with_profile
+        mock_zerodb,
+        sample_user_with_profile_dict
     ):
         """Test updating profile bio"""
         # Arrange
-        user, profile = sample_user_with_profile
-        token = create_access_token({"sub": str(user.id), "linkedin_id": user.linkedin_id})
+        user, profile = sample_user_with_profile_dict
+        token = create_access_token({"sub": user["id"], "linkedin_id": user["linkedin_id"]})
 
         new_bio = "Updated bio for testing purposes"
+        updated_profile = {**profile, "bio": new_bio}
+
+        mock_zerodb.get_by_id.return_value = user
+        mock_zerodb.query_rows.side_effect = [[profile], [updated_profile]]
+        mock_zerodb.update_rows.return_value = {"success": True, "updated": 1}
 
         # Act
-        response = await client.put(
-            "/api/v1/profile/me",
-            headers={"Authorization": f"Bearer {token}"},
-            json={"bio": new_bio}
-        )
+        with patch('app.services.auth_service.zerodb_client', mock_zerodb):
+            with patch('app.services.profile_service.zerodb_client', mock_zerodb):
+                with patch('app.services.profile_service.embedding_service') as mock_embedding:
+                    mock_embedding.generate_embedding = AsyncMock(return_value=[0.1] * 1536)
+                    mock_embedding.upsert_vector = AsyncMock(return_value="vec_bio")
+
+                    response = await client.put(
+                        "/api/v1/profile/me",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json={"bio": new_bio}
+                    )
 
         # Assert
         assert response.status_code == 200
         data = response.json()
 
         assert data["bio"] == new_bio
-        assert data["user_id"] == str(user.id)
+        assert data["user_id"] == user["id"]
 
     @pytest.mark.asyncio
     async def test_update_profile_current_focus(
         self,
         client: AsyncClient,
-        sample_user_with_profile
+        mock_zerodb,
+        sample_user_with_profile_dict
     ):
         """Test updating current focus"""
         # Arrange
-        user, profile = sample_user_with_profile
-        token = create_access_token({"sub": str(user.id), "linkedin_id": user.linkedin_id})
+        user, profile = sample_user_with_profile_dict
+        token = create_access_token({"sub": user["id"], "linkedin_id": user["linkedin_id"]})
 
         new_focus = "Building next-generation AI platform"
+        updated_profile = {**profile, "current_focus": new_focus}
+
+        mock_zerodb.get_by_id.return_value = user
+        mock_zerodb.query_rows.side_effect = [[profile], [updated_profile]]
+        mock_zerodb.update_rows.return_value = {"success": True, "updated": 1}
 
         # Act
-        response = await client.put(
-            "/api/v1/profile/me",
-            headers={"Authorization": f"Bearer {token}"},
-            json={"current_focus": new_focus}
-        )
+        with patch('app.services.auth_service.zerodb_client', mock_zerodb):
+            with patch('app.services.profile_service.zerodb_client', mock_zerodb):
+                with patch('app.services.profile_service.embedding_service') as mock_embedding:
+                    mock_embedding.generate_embedding = AsyncMock(return_value=[0.1] * 1536)
+                    mock_embedding.upsert_vector = AsyncMock(return_value="vec_focus")
+
+                    response = await client.put(
+                        "/api/v1/profile/me",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json={"current_focus": new_focus}
+                    )
 
         # Assert
         assert response.status_code == 200
@@ -124,19 +154,28 @@ class TestUpdateMyProfile:
     async def test_update_profile_autonomy_mode(
         self,
         client: AsyncClient,
-        sample_user_with_profile
+        mock_zerodb,
+        sample_user_with_profile_dict
     ):
         """Test updating autonomy mode"""
         # Arrange
-        user, profile = sample_user_with_profile
-        token = create_access_token({"sub": str(user.id), "linkedin_id": user.linkedin_id})
+        user, profile = sample_user_with_profile_dict
+        token = create_access_token({"sub": user["id"], "linkedin_id": user["linkedin_id"]})
+
+        updated_profile = {**profile, "autonomy_mode": AutonomyMode.AUTO.value}
+
+        mock_zerodb.get_by_id.return_value = user
+        mock_zerodb.query_rows.side_effect = [[profile], [updated_profile]]
+        mock_zerodb.update_rows.return_value = {"success": True, "updated": 1}
 
         # Act
-        response = await client.put(
-            "/api/v1/profile/me",
-            headers={"Authorization": f"Bearer {token}"},
-            json={"autonomy_mode": "auto"}
-        )
+        with patch('app.services.auth_service.zerodb_client', mock_zerodb):
+            with patch('app.services.profile_service.zerodb_client', mock_zerodb):
+                response = await client.put(
+                    "/api/v1/profile/me",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"autonomy_mode": "auto"}
+                )
 
         # Assert
         assert response.status_code == 200
@@ -148,19 +187,28 @@ class TestUpdateMyProfile:
     async def test_update_profile_visibility(
         self,
         client: AsyncClient,
-        sample_user_with_profile
+        mock_zerodb,
+        sample_user_with_profile_dict
     ):
         """Test updating profile visibility"""
         # Arrange
-        user, profile = sample_user_with_profile
-        token = create_access_token({"sub": str(user.id), "linkedin_id": user.linkedin_id})
+        user, profile = sample_user_with_profile_dict
+        token = create_access_token({"sub": user["id"], "linkedin_id": user["linkedin_id"]})
+
+        updated_profile = {**profile, "public_visibility": False}
+
+        mock_zerodb.get_by_id.return_value = user
+        mock_zerodb.query_rows.side_effect = [[profile], [updated_profile]]
+        mock_zerodb.update_rows.return_value = {"success": True, "updated": 1}
 
         # Act
-        response = await client.put(
-            "/api/v1/profile/me",
-            headers={"Authorization": f"Bearer {token}"},
-            json={"public_visibility": False}
-        )
+        with patch('app.services.auth_service.zerodb_client', mock_zerodb):
+            with patch('app.services.profile_service.zerodb_client', mock_zerodb):
+                response = await client.put(
+                    "/api/v1/profile/me",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"public_visibility": False}
+                )
 
         # Assert
         assert response.status_code == 200
@@ -189,55 +237,65 @@ class TestGetUserProfile:
     async def test_get_public_profile(
         self,
         client: AsyncClient,
-        sample_user_with_profile
+        mock_zerodb,
+        sample_user_with_profile_dict
     ):
         """Test getting another user's public profile"""
         # Arrange
-        user, profile = sample_user_with_profile
+        user, profile = sample_user_with_profile_dict
 
         # Ensure profile is public
-        assert profile.public_visibility is True
+        profile["public_visibility"] = True
+
+        mock_zerodb.get_by_id.return_value = user
+        mock_zerodb.query_rows.return_value = [profile]
 
         # Act
-        response = await client.get(f"/api/v1/profile/{user.id}")
+        with patch('app.services.profile_service.zerodb_client', mock_zerodb):
+            response = await client.get(f"/api/v1/profile/{user['id']}")
 
         # Assert
         assert response.status_code == 200
         data = response.json()
 
-        assert data["user"]["id"] == str(user.id)
+        assert data["user"]["id"] == user["id"]
         assert data["profile"]["public_visibility"] is True
 
     @pytest.mark.asyncio
     async def test_get_private_profile_forbidden(
         self,
         client: AsyncClient,
-        db_session: AsyncSession,
-        sample_user_with_profile
+        mock_zerodb,
+        sample_user_with_profile_dict
     ):
         """Test getting private profile returns 403"""
         # Arrange
-        user, profile = sample_user_with_profile
+        user, profile = sample_user_with_profile_dict
 
         # Make profile private
-        profile.public_visibility = False
-        await db_session.commit()
+        profile["public_visibility"] = False
+
+        mock_zerodb.get_by_id.return_value = user
+        mock_zerodb.query_rows.return_value = [profile]
 
         # Act
-        response = await client.get(f"/api/v1/profile/{user.id}")
+        with patch('app.services.profile_service.zerodb_client', mock_zerodb):
+            response = await client.get(f"/api/v1/profile/{user['id']}")
 
         # Assert
         assert response.status_code == 403
 
     @pytest.mark.asyncio
-    async def test_get_nonexistent_profile(self, client: AsyncClient):
+    async def test_get_nonexistent_profile(self, client: AsyncClient, mock_zerodb):
         """Test getting non-existent profile returns 404"""
         # Arrange
-        import uuid
-        nonexistent_id = uuid.uuid4()
+        nonexistent_id = str(uuid.uuid4())
+
+        mock_zerodb.get_by_id.return_value = None
 
         # Act
-        response = await client.get(f"/api/v1/profile/{nonexistent_id}")
+        with patch('app.services.profile_service.zerodb_client', mock_zerodb):
+            response = await client.get(f"/api/v1/profile/{nonexistent_id}")
 
         # Assert
         assert response.status_code == 404
@@ -251,11 +309,20 @@ class TestListPublicProfiles:
     async def test_list_public_profiles(
         self,
         client: AsyncClient,
-        sample_user_with_profile
+        mock_zerodb,
+        sample_user_with_profile_dict
     ):
         """Test listing public profiles"""
+        # Arrange
+        user, profile = sample_user_with_profile_dict
+        profile["public_visibility"] = True
+
+        mock_zerodb.query_rows.return_value = [profile]
+        mock_zerodb.get_by_id.return_value = user
+
         # Act
-        response = await client.get("/api/v1/profile/")
+        with patch('app.services.profile_service.zerodb_client', mock_zerodb):
+            response = await client.get("/api/v1/profile/")
 
         # Assert
         assert response.status_code == 200
@@ -273,14 +340,23 @@ class TestListPublicProfiles:
     async def test_list_public_profiles_pagination(
         self,
         client: AsyncClient,
-        sample_user_with_profile
+        mock_zerodb,
+        sample_user_with_profile_dict
     ):
         """Test pagination parameters"""
+        # Arrange
+        user, profile = sample_user_with_profile_dict
+        profile["public_visibility"] = True
+
+        mock_zerodb.query_rows.return_value = [profile]
+        mock_zerodb.get_by_id.return_value = user
+
         # Act
-        response = await client.get(
-            "/api/v1/profile/",
-            params={"limit": 5, "offset": 0}
-        )
+        with patch('app.services.profile_service.zerodb_client', mock_zerodb):
+            response = await client.get(
+                "/api/v1/profile/",
+                params={"limit": 5, "offset": 0}
+            )
 
         # Assert
         assert response.status_code == 200
@@ -293,19 +369,22 @@ class TestListPublicProfiles:
     async def test_list_profiles_excludes_private(
         self,
         client: AsyncClient,
-        db_session: AsyncSession,
-        sample_user_with_profile
+        mock_zerodb,
+        sample_user_with_profile_dict
     ):
         """Test listing profiles excludes private ones"""
         # Arrange
-        user, profile = sample_user_with_profile
+        user, profile = sample_user_with_profile_dict
 
-        # Make profile private
-        profile.public_visibility = False
-        await db_session.commit()
+        # Make profile private - should not be returned
+        profile["public_visibility"] = False
+
+        # Mock returns empty list (private profiles filtered out)
+        mock_zerodb.query_rows.return_value = []
 
         # Act
-        response = await client.get("/api/v1/profile/")
+        with patch('app.services.profile_service.zerodb_client', mock_zerodb):
+            response = await client.get("/api/v1/profile/")
 
         # Assert
         assert response.status_code == 200
@@ -313,4 +392,4 @@ class TestListPublicProfiles:
 
         # Private profile should not be in list
         profile_ids = [p["user"]["id"] for p in data]
-        assert str(user.id) not in profile_ids
+        assert user["id"] not in profile_ids
