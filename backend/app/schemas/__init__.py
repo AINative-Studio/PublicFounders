@@ -18,6 +18,17 @@ from app.schemas.auth import (
     PhoneVerificationRequest,
     PhoneVerificationConfirm
 )
+from app.schemas.advisor_agent import (
+    AdvisorAgentCreate,
+    AdvisorAgentUpdate,
+    AdvisorAgentResponse,
+    AgentMemoryCreate,
+    AgentMemoryResponse,
+    AgentSuggestion,
+    WeeklyOpportunitySummary,
+    AgentActionRequest,
+    AgentActionResponse
+)
 
 __all__ = [
     "UserResponse",
@@ -31,4 +42,13 @@ __all__ = [
     "TokenData",
     "PhoneVerificationRequest",
     "PhoneVerificationConfirm",
+    "AdvisorAgentCreate",
+    "AdvisorAgentUpdate",
+    "AdvisorAgentResponse",
+    "AgentMemoryCreate",
+    "AgentMemoryResponse",
+    "AgentSuggestion",
+    "WeeklyOpportunitySummary",
+    "AgentActionRequest",
+    "AgentActionResponse",
 ]

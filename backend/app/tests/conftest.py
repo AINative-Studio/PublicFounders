@@ -187,3 +187,58 @@ def mock_embedding_vector():
     """Mock 1536-dimensional embedding vector"""
     import numpy as np
     return np.random.rand(1536).tolist()
+
+
+@pytest.fixture
+async def sample_user_with_profile_and_agent(db_session: AsyncSession) -> tuple:
+    """Create a sample user with founder profile and advisor agent"""
+    from app.models.advisor_agent import AdvisorAgent, AgentStatus
+
+    user = User(
+        id=uuid.uuid4(),
+        linkedin_id="linkedin_agent_test",
+        name="Agent Test User",
+        headline="Founder Testing Agent",
+        email="agent.test@example.com",
+        is_active=True,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow()
+    )
+
+    db_session.add(user)
+    await db_session.flush()
+
+    profile = FounderProfile(
+        user_id=user.id,
+        bio="Testing advisor agent functionality",
+        current_focus="Building AI-powered features",
+        autonomy_mode=AutonomyMode.SUGGEST,
+        public_visibility=True,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow()
+    )
+
+    db_session.add(profile)
+    await db_session.flush()
+
+    agent = AdvisorAgent(
+        id=uuid.uuid4(),
+        user_id=user.id,
+        status=AgentStatus.ACTIVE,
+        name="Test Advisor",
+        memory_namespace=f"agent_{str(user.id)}",
+        total_memories=0,
+        total_suggestions=0,
+        total_actions=0,
+        is_enabled=True,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow()
+    )
+
+    db_session.add(agent)
+    await db_session.commit()
+    await db_session.refresh(user)
+    await db_session.refresh(profile)
+    await db_session.refresh(agent)
+
+    return user, profile, agent
