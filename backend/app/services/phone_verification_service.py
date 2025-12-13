@@ -1,0 +1,181 @@
+"""
+Phone Verification Service
+Handles phone number verification with SMS codes
+"""
+import uuid
+import re
+from datetime import datetime, timedelta
+from typing import Optional
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.user import User
+from app.core.config import settings
+from app.core.security import generate_verification_code
+
+
+class PhoneVerificationService:
+    """Service for phone number verification"""
+
+    def __init__(self, db: AsyncSession):
+        self.db = db
+
+    def _validate_phone_format(self, phone_number: str) -> str:
+        """
+        Validate phone number format (E.164)
+
+        Args:
+            phone_number: Phone number to validate
+
+        Returns:
+            Cleaned phone number
+
+        Raises:
+            ValueError: If phone number is invalid
+        """
+        if not phone_number:
+            raise ValueError("Phone number is required")
+
+        # Remove all non-digit characters except +
+        cleaned = re.sub(r'[^\d+]', '', phone_number)
+
+        # Must start with + and have 10-15 digits
+        if not re.match(r'^\+\d{10,15}$', cleaned):
+            raise ValueError(
+                "Phone number must be in E.164 format (e.g., +1234567890)"
+            )
+
+        return cleaned
+
+    async def _send_sms(self, phone_number: str, code: str) -> bool:
+        """
+        Send SMS verification code
+        (Mock implementation - integrate with Twilio in production)
+
+        Args:
+            phone_number: Phone number to send to
+            code: Verification code
+
+        Returns:
+            True if sent successfully
+        """
+        # TODO: Integrate with Twilio Verify API
+        # For MVP, we'll just log the code (in production this sends SMS)
+        print(f"[SMS] Sending verification code {code} to {phone_number}")
+        return True
+
+    async def send_verification_code(
+        self,
+        user_id: uuid.UUID,
+        phone_number: str
+    ) -> bool:
+        """
+        Generate and send verification code to phone number
+
+        Args:
+            user_id: User UUID
+            phone_number: Phone number to verify
+
+        Returns:
+            True if code sent successfully
+
+        Raises:
+            ValueError: If phone number format is invalid
+        """
+        # Validate format
+        cleaned_phone = self._validate_phone_format(phone_number)
+
+        # Get user
+        user = await self.db.get(User, user_id)
+        if not user:
+            raise ValueError("User not found")
+
+        # Generate verification code
+        code = generate_verification_code(
+            length=settings.PHONE_VERIFICATION_CODE_LENGTH
+        )
+
+        # Set expiry time
+        expires_at = datetime.utcnow() + timedelta(
+            minutes=settings.PHONE_VERIFICATION_CODE_EXPIRY_MINUTES
+        )
+
+        # Update user with verification code
+        user.phone_number = cleaned_phone
+        user.phone_verification_code = code
+        user.phone_verification_expires_at = expires_at
+        user.phone_verified = False  # Reset verification status
+        user.updated_at = datetime.utcnow()
+
+        await self.db.commit()
+
+        # Send SMS
+        await self._send_sms(cleaned_phone, code)
+
+        return True
+
+    async def verify_phone(
+        self,
+        user_id: uuid.UUID,
+        phone_number: str,
+        verification_code: str
+    ) -> bool:
+        """
+        Verify phone number with code
+
+        Args:
+            user_id: User UUID
+            phone_number: Phone number being verified
+            verification_code: Verification code from SMS
+
+        Returns:
+            True if verification successful, False otherwise
+        """
+        # Get user
+        user = await self.db.get(User, user_id)
+        if not user:
+            return False
+
+        # Check if phone number matches
+        if user.phone_number != phone_number:
+            return False
+
+        # Check if code exists
+        if not user.phone_verification_code:
+            return False
+
+        # Check if code matches
+        if user.phone_verification_code != verification_code:
+            return False
+
+        # Check if code has expired
+        if not user.phone_verification_expires_at:
+            return False
+
+        if user.phone_verification_expires_at < datetime.utcnow():
+            return False
+
+        # Verification successful
+        user.phone_verified = True
+        user.phone_verification_code = None  # Clear code after use
+        user.phone_verification_expires_at = None
+        user.updated_at = datetime.utcnow()
+
+        await self.db.commit()
+
+        return True
+
+    async def is_phone_verified(self, user_id: uuid.UUID) -> bool:
+        """
+        Check if user's phone is verified
+
+        Args:
+            user_id: User UUID
+
+        Returns:
+            True if phone is verified
+        """
+        user = await self.db.get(User, user_id)
+        if not user:
+            return False
+
+        return user.phone_verified
