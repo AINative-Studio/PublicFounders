@@ -9,26 +9,26 @@ PublicFounders is a build-in-public platform that uses AI agents to intelligentl
 ### Tech Stack
 
 - **Backend Framework**: Python 3.9+ with FastAPI
-- **Database**: PostgreSQL 15+ (relational data)
-- **Vector Store**: ZeroDB (semantic embeddings)
+- **Database**: ZeroDB (unified NoSQL + vector storage)
 - **Authentication**: LinkedIn OAuth 2.0
+- **Embeddings**: OpenAI text-embedding-3-small (1536 dimensions)
 - **Testing**: pytest with 80% minimum coverage
 - **Code Quality**: Ruff, Black, MyPy, pre-commit hooks
 - **CI/CD**: GitHub Actions
 
 ### Design Philosophy
 
-PublicFounders implements a **dual-layer data model**:
+PublicFounders implements a **unified semantic architecture**:
 
-1. **Relational Layer** (PostgreSQL): Source of truth for deterministic, auditable data
-2. **Vector Layer** (ZeroDB): Intelligence layer for semantic matching and AI agent decision-making
+**Single Platform** (ZeroDB): All data in one place - relational NoSQL tables + vector embeddings for semantic intelligence, eliminating the complexity of managing multiple databases while maintaining full auditability and AI capabilities.
 
 ## Quick Start
 
 ### Prerequisites
 
 - Python 3.9 or higher
-- PostgreSQL 15 or higher
+- ZeroDB account (sign up at https://zerodb.ai)
+- OpenAI API key
 - Git
 
 ### Installation
@@ -51,24 +51,40 @@ pip install -r requirements.txt
 pip install -r requirements-dev.txt  # For development
 ```
 
-4. **Set up environment variables**:
+4. **Set up ZeroDB project**:
+   - Create a project at https://zerodb.ai
+   - Get your API key and project ID
+   - Tables are already created (8 NoSQL tables)
+
+5. **Set up environment variables**:
 ```bash
-cp .env.example .env
-# Edit .env with your actual credentials
+# Create .env file in project root
+cat > .env << EOF
+# ZeroDB Configuration
+ZERODB_API_KEY=your_zerodb_api_key_here
+ZERODB_PROJECT_ID=your_zerodb_project_id_here
+
+# OpenAI Configuration
+OPENAI_API_KEY=your_openai_api_key_here
+
+# JWT Configuration
+JWT_SECRET_KEY=your-secret-key-change-in-production
+JWT_ALGORITHM=HS256
+JWT_ACCESS_TOKEN_EXPIRE_MINUTES=10080
+
+# LinkedIn OAuth (optional for development)
+LINKEDIN_CLIENT_ID=your_linkedin_client_id
+LINKEDIN_CLIENT_SECRET=your_linkedin_client_secret
+LINKEDIN_REDIRECT_URI=http://localhost:8000/api/v1/auth/linkedin/callback
+
+# Application Settings
+ENVIRONMENT=development
+API_V1_PREFIX=/api/v1
+PROJECT_NAME=PublicFounders
+EOF
 ```
 
-5. **Set up PostgreSQL database**:
-```bash
-createdb publicfounders
-```
-
-6. **Run database migrations**:
-```bash
-cd backend
-alembic upgrade head
-```
-
-7. **Install pre-commit hooks** (recommended for development):
+6. **Install pre-commit hooks** (recommended for development):
 ```bash
 pre-commit install
 ```
@@ -85,6 +101,8 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 - API Documentation: http://localhost:8000/api/docs
 - ReDoc: http://localhost:8000/api/redoc
 - Health Check: http://localhost:8000/health
+
+**No database migrations needed!** ZeroDB tables are managed directly via the API.
 
 ## Testing
 
@@ -161,23 +179,34 @@ Pre-commit hooks automatically run on every commit:
 git commit --no-verify
 ```
 
-### Database Migrations
+### ZeroDB Development
 
-**Create a new migration**:
-```bash
-cd backend
-alembic revision --autogenerate -m "Description of changes"
-```
+**No migrations needed!** ZeroDB uses schema-less NoSQL tables that adapt automatically.
 
-**Apply migrations**:
-```bash
-alembic upgrade head
-```
+**Working with data**:
+```python
+from app.services.zerodb_client import zerodb_client
 
-**Rollback migrations**:
-```bash
-alembic downgrade -1  # Rollback one migration
-alembic downgrade base  # Rollback all migrations
+# Insert data
+await zerodb_client.insert_rows("users", [{
+    "id": str(uuid4()),
+    "email": "founder@example.com",
+    "name": "Jane Founder"
+}])
+
+# Query data
+users = await zerodb_client.query_rows(
+    "users",
+    filter={"email": "founder@example.com"},
+    limit=10
+)
+
+# Update data
+await zerodb_client.update_rows(
+    "users",
+    filter={"id": user_id},
+    update={"$set": {"name": "New Name"}}
+)
 ```
 
 ## Project Structure
@@ -218,27 +247,26 @@ PublicFounders/
 
 ## Data Model
 
-### Relational Tables (PostgreSQL)
+### ZeroDB NoSQL Tables (8 tables)
 
-- **users**: Core user authentication and profile
-- **founder_profiles**: Founder-specific data and preferences
+- **users**: User authentication and profile data
+- **founder_profiles**: Founder-specific preferences and bio
 - **companies**: Company information
 - **company_roles**: User-company relationships
-- **goals**: Founder goals and intentions
-- **asks**: Specific help requests
+- **goals**: Founder goals and objectives
+- **asks**: Help requests from founders
 - **posts**: Build-in-public content
 - **introductions**: AI-facilitated connections
-- **interaction_outcomes**: Introduction results for RLHF
 
-### Vector Collections (ZeroDB)
+### ZeroDB Vector Store
 
-- **founder_embeddings**: Semantic founder profiles
-- **goal_embeddings**: Intent-aware goal vectors
-- **ask_embeddings**: Help request embeddings
-- **post_embeddings**: Content discovery vectors
-- **introduction_embeddings**: Connection rationale
-- **interaction_embeddings**: Outcome patterns
-- **agent_memory_embeddings**: AI learning memory
+All tables automatically support vector embeddings for semantic search:
+- **Founder embeddings**: Composite of bio + experience + goals
+- **Goal embeddings**: Intent vectors for matching
+- **Ask embeddings**: Help requests with urgency weighting
+- **Post embeddings**: Content for discovery
+
+**Key Benefit**: NoSQL data + vector embeddings in a single platform - no synchronization issues!
 
 ## Sprint Plan
 
@@ -286,17 +314,65 @@ Full API documentation available at `/api/docs` when running the server.
 
 ## Environment Variables
 
-See `.env.example` for all required environment variables. Key variables:
+Required environment variables for PublicFounders:
 
 | Variable | Description | Required |
 |----------|-------------|----------|
-| `DATABASE_URL` | PostgreSQL connection string | Yes |
-| `ZERODB_API_KEY` | ZeroDB API key | Yes |
+| `ZERODB_API_KEY` | ZeroDB API key for database access | Yes |
 | `ZERODB_PROJECT_ID` | ZeroDB project identifier | Yes |
 | `OPENAI_API_KEY` | OpenAI API key for embeddings | Yes |
-| `LINKEDIN_CLIENT_ID` | LinkedIn OAuth client ID | Sprint 1+ |
-| `LINKEDIN_CLIENT_SECRET` | LinkedIn OAuth secret | Sprint 1+ |
 | `JWT_SECRET_KEY` | JWT signing key (change in prod!) | Yes |
+| `JWT_ALGORITHM` | JWT algorithm (HS256) | Yes |
+| `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` | Token expiry (7 days = 10080) | Yes |
+| `LINKEDIN_CLIENT_ID` | LinkedIn OAuth client ID | Optional |
+| `LINKEDIN_CLIENT_SECRET` | LinkedIn OAuth secret | Optional |
+| `LINKEDIN_REDIRECT_URI` | OAuth callback URL | Optional |
+| `ENVIRONMENT` | Environment (development/production) | Yes |
+
+**Note**: No PostgreSQL or Redis required - everything runs on ZeroDB!
+
+## Why ZeroDB? Key Benefits
+
+### Simplified Architecture
+- **One Platform**: NoSQL tables + vector embeddings in a single database
+- **No Syncing**: Relational data and semantic vectors always in sync
+- **Fewer Dependencies**: No PostgreSQL, no Redis, no connection pooling complexity
+
+### Developer Experience
+- **No Migrations**: Schema-less NoSQL adapts automatically
+- **Simple API**: MongoDB-style queries, not SQL or ORM
+- **Fast Development**: No database setup, just API credentials
+- **Easy Testing**: Direct HTTP API calls, no database containers
+
+### Performance & Cost
+- **Lower Latency**: Direct REST API, no ORM overhead
+- **Built-in Caching**: ZeroDB handles caching internally
+- **Cost Effective**: Single subscription vs. multiple database services
+- **Auto Scaling**: Distributed architecture handles growth
+
+### AI-Native Features
+- **Semantic Search**: Vector embeddings built-in, no separate store
+- **RLHF Support**: Event streams for reinforcement learning
+- **Agent Memory**: Long-term learning capabilities
+- **Quantum Ready**: Future-proof for advanced AI workloads
+
+## Troubleshooting
+
+### Common Issues
+
+**Issue**: `ZERODB_API_KEY not found`
+- **Solution**: Make sure `.env` file exists in project root with valid API key
+
+**Issue**: `httpx.HTTPStatusError: 401 Unauthorized`
+- **Solution**: Check that your ZeroDB API key is valid and not expired
+
+**Issue**: `Table not found` error
+- **Solution**: Verify your `ZERODB_PROJECT_ID` is correct and tables are created
+
+**Issue**: OpenAI embeddings failing
+- **Solution**: Check `OPENAI_API_KEY` is valid and has available credits
+
+**Need help?** Open an issue on GitHub or contact support@ainative.studio
 
 ## CI/CD Pipeline
 

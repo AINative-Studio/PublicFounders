@@ -7,7 +7,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from app.core.config import settings
-from app.core.database import init_db, close_db
 from app.api.v1 import api_router
 
 
@@ -15,10 +14,10 @@ from app.api.v1 import api_router
 async def lifespan(app: FastAPI):
     """Application lifespan events"""
     # Startup
-    await init_db()
+    # Note: ZeroDB initialization handled via environment variables
     yield
     # Shutdown
-    await close_db()
+    # Note: ZeroDB connections managed automatically
 
 
 # Create FastAPI application

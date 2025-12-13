@@ -7,9 +7,7 @@ from datetime import datetime
 from typing import Optional, Tuple
 from app.services.zerodb_client import zerodb_client
 from app.schemas.user import LinkedInUserData
-
-# Import enums
-from app.models.founder_profile import AutonomyMode
+from app.core.enums import AutonomyMode
 
 
 class AuthService:

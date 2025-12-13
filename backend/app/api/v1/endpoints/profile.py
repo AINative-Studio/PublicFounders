@@ -6,9 +6,7 @@ import logging
 import uuid
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Query
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import get_db
 from app.core.security import decode_access_token
 from app.services.profile_service import ProfileService
 from app.services.auth_service import AuthService
@@ -69,16 +67,15 @@ async def get_current_user_id(
 
 @router.get("/me", response_model=dict)
 async def get_my_profile(
-    current_user_id: uuid.UUID = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db)
+    current_user_id: uuid.UUID = Depends(get_current_user_id)
 ):
     """
     Get current user's profile
 
     Returns user data and founder profile
     """
-    profile_service = ProfileService(db)
-    auth_service = AuthService(db)
+    profile_service = ProfileService()
+    auth_service = AuthService()
 
     # Get user
     user = await auth_service.get_user_by_id(current_user_id)
@@ -105,8 +102,7 @@ async def get_my_profile(
 @router.put("/me", response_model=FounderProfileResponse)
 async def update_my_profile(
     update_data: FounderProfileUpdate,
-    current_user_id: uuid.UUID = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db)
+    current_user_id: uuid.UUID = Depends(get_current_user_id)
 ):
     """
     Update current user's profile
@@ -114,7 +110,7 @@ async def update_my_profile(
     Triggers embedding regeneration if bio or focus changes
     Scans bio and current_focus for PII and inappropriate content
     """
-    profile_service = ProfileService(db)
+    profile_service = ProfileService()
 
     # Scan bio for safety issues if provided
     if update_data.bio:
@@ -190,8 +186,7 @@ async def update_my_profile(
 
 @router.get("/{user_id}", response_model=dict)
 async def get_user_profile(
-    user_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db)
+    user_id: uuid.UUID
 ):
     """
     Get another user's profile (public profiles only)
@@ -199,8 +194,8 @@ async def get_user_profile(
     Args:
         user_id: User UUID to retrieve
     """
-    profile_service = ProfileService(db)
-    auth_service = AuthService(db)
+    profile_service = ProfileService()
+    auth_service = AuthService()
 
     # Get user
     user = await auth_service.get_user_by_id(user_id)
@@ -234,8 +229,7 @@ async def get_user_profile(
 @router.get("/", response_model=list)
 async def list_public_profiles(
     limit: int = Query(default=10, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
-    db: AsyncSession = Depends(get_db)
+    offset: int = Query(default=0, ge=0)
 ):
     """
     List public founder profiles
@@ -244,7 +238,7 @@ async def list_public_profiles(
         limit: Maximum number of profiles to return (1-100)
         offset: Pagination offset
     """
-    profile_service = ProfileService(db)
+    profile_service = ProfileService()
 
     profiles = await profile_service.get_public_profiles(
         limit=limit,
@@ -252,7 +246,7 @@ async def list_public_profiles(
     )
 
     # Get users for each profile
-    auth_service = AuthService(db)
+    auth_service = AuthService()
     result = []
 
     for profile in profiles:

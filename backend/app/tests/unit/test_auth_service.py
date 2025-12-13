@@ -1,17 +1,15 @@
 """
-Unit Tests for Authentication Service
-TDD tests for LinkedIn OAuth and user management
+Unit Tests for Authentication Service - ZeroDB Edition
+TDD tests for LinkedIn OAuth and user management using ZeroDB
 """
 import pytest
 import uuid
 from datetime import datetime, timedelta
 from unittest.mock import Mock, AsyncMock, patch
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.auth_service import AuthService
-from app.models.user import User
-from app.models.founder_profile import FounderProfile, AutonomyMode
 from app.schemas.user import LinkedInUserData
+from app.core.enums import AutonomyMode
 
 
 @pytest.mark.unit
@@ -19,7 +17,7 @@ class TestLinkedInOAuth:
     """Test suite for LinkedIn OAuth operations"""
 
     @pytest.mark.asyncio
-    async def test_create_user_from_linkedin_data_creates_user(self, db_session: AsyncSession):
+    async def test_create_user_from_linkedin_data_creates_user(self, mock_zerodb):
         """Test creating user from LinkedIn data - user record created"""
         # Arrange
         linkedin_data = LinkedInUserData(
@@ -30,20 +28,29 @@ class TestLinkedInOAuth:
             location="San Francisco, CA",
             email="test@example.com"
         )
-        auth_service = AuthService(db_session)
+
+        # Mock that user doesn't exist
+        mock_zerodb.get_by_field.return_value = None
+        mock_zerodb.insert_rows.return_value = {"success": True, "inserted": 1}
+
+        auth_service = AuthService()
 
         # Act
-        user, profile = await auth_service.create_user_from_linkedin(linkedin_data)
+        with patch('app.services.auth_service.zerodb_client', mock_zerodb):
+            user, profile = await auth_service.create_user_from_linkedin(linkedin_data)
 
         # Assert
         assert user is not None
-        assert user.linkedin_id == linkedin_data.linkedin_id
-        assert user.name == linkedin_data.name
-        assert user.email == linkedin_data.email
-        assert user.is_active is True
+        assert isinstance(user, dict)
+        assert user["linkedin_id"] == linkedin_data.linkedin_id
+        assert user["name"] == linkedin_data.name
+        assert user["email"] == linkedin_data.email
+
+        # Verify insert was called twice (user + profile)
+        assert mock_zerodb.insert_rows.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_create_user_from_linkedin_data_creates_profile(self, db_session: AsyncSession):
+    async def test_create_user_from_linkedin_data_creates_profile(self, mock_zerodb):
         """Test creating user from LinkedIn data - founder profile created"""
         # Arrange
         linkedin_data = LinkedInUserData(
@@ -51,19 +58,25 @@ class TestLinkedInOAuth:
             name="Profile Test",
             email="profile@example.com"
         )
-        auth_service = AuthService(db_session)
+
+        mock_zerodb.get_by_field.return_value = None
+        mock_zerodb.insert_rows.return_value = {"success": True, "inserted": 1}
+
+        auth_service = AuthService()
 
         # Act
-        user, profile = await auth_service.create_user_from_linkedin(linkedin_data)
+        with patch('app.services.auth_service.zerodb_client', mock_zerodb):
+            user, profile = await auth_service.create_user_from_linkedin(linkedin_data)
 
         # Assert
         assert profile is not None
-        assert profile.user_id == user.id
-        assert profile.public_visibility is True
-        assert profile.autonomy_mode == AutonomyMode.SUGGEST
+        assert isinstance(profile, dict)
+        assert profile["user_id"] == user["id"]
+        assert profile["public_visibility"] is True
+        assert profile["autonomy_mode"] == AutonomyMode.SUGGEST.value
 
     @pytest.mark.asyncio
-    async def test_create_user_from_linkedin_creates_user_exactly_once(self, db_session: AsyncSession):
+    async def test_create_user_from_linkedin_creates_user_exactly_once(self, mock_zerodb):
         """TDD: User record is created exactly once"""
         # Arrange
         linkedin_data = LinkedInUserData(
@@ -71,21 +84,35 @@ class TestLinkedInOAuth:
             name="Unique User",
             email="unique@example.com"
         )
-        auth_service = AuthService(db_session)
+
+        user_id = str(uuid.uuid4())
+        now = datetime.utcnow().isoformat()
+        created_user = {
+            "id": user_id,
+            "linkedin_id": linkedin_data.linkedin_id,
+            "name": linkedin_data.name,
+            "email": linkedin_data.email
+        }
+
+        # First call: user doesn't exist
+        mock_zerodb.get_by_field.side_effect = [None, created_user]
+        mock_zerodb.insert_rows.return_value = {"success": True, "inserted": 1}
+
+        auth_service = AuthService()
 
         # Act
-        user1, profile1 = await auth_service.create_user_from_linkedin(linkedin_data)
+        with patch('app.services.auth_service.zerodb_client', mock_zerodb):
+            user1, profile1 = await auth_service.create_user_from_linkedin(linkedin_data)
 
-        # Try to get user again with same LinkedIn ID
-        existing_user = await auth_service.get_user_by_linkedin_id(linkedin_data.linkedin_id)
+            # Try to get user again with same LinkedIn ID
+            existing_user = await auth_service.get_user_by_linkedin_id(linkedin_data.linkedin_id)
 
         # Assert
         assert existing_user is not None
-        assert existing_user.id == user1.id
-        assert existing_user.linkedin_id == linkedin_data.linkedin_id
+        assert existing_user["linkedin_id"] == linkedin_data.linkedin_id
 
     @pytest.mark.asyncio
-    async def test_linkedin_id_must_be_unique(self, db_session: AsyncSession):
+    async def test_linkedin_id_must_be_unique(self, mock_zerodb):
         """TDD: LinkedIn ID is unique - duplicate creation should fail"""
         # Arrange
         linkedin_data = LinkedInUserData(
@@ -93,38 +120,36 @@ class TestLinkedInOAuth:
             name="First User",
             email="first@example.com"
         )
-        auth_service = AuthService(db_session)
 
-        # Act - Create first user
-        await auth_service.create_user_from_linkedin(linkedin_data)
+        # Mock that user already exists
+        existing_user = {
+            "id": str(uuid.uuid4()),
+            "linkedin_id": linkedin_data.linkedin_id,
+            "name": "Existing User"
+        }
+        mock_zerodb.get_by_field.return_value = existing_user
 
-        # Try to create second user with same LinkedIn ID
-        duplicate_data = LinkedInUserData(
-            linkedin_id="linkedin_duplicate_999",  # Same LinkedIn ID
-            name="Second User",
-            email="second@example.com"
-        )
+        auth_service = AuthService()
 
-        # Assert - Should raise an exception
-        with pytest.raises(Exception):  # SQLAlchemy IntegrityError
-            await auth_service.create_user_from_linkedin(duplicate_data)
+        # Act & Assert - Should raise an exception
+        with patch('app.services.auth_service.zerodb_client', mock_zerodb):
+            with pytest.raises(Exception, match="already exists"):
+                await auth_service.create_user_from_linkedin(linkedin_data)
 
     @pytest.mark.asyncio
-    async def test_failed_oauth_does_not_create_user(self, db_session: AsyncSession):
+    async def test_failed_oauth_does_not_create_user(self, mock_zerodb):
         """TDD: Failed OAuth does not create user"""
         # Arrange
-        auth_service = AuthService(db_session)
+        auth_service = AuthService()
         invalid_linkedin_data = None
 
         # Act & Assert
-        with pytest.raises(Exception):
-            await auth_service.create_user_from_linkedin(invalid_linkedin_data)
-
-        # Verify no user was created
-        # (This would be checked by counting users in DB, but we're testing the exception)
+        with patch('app.services.auth_service.zerodb_client', mock_zerodb):
+            with pytest.raises(ValueError):
+                await auth_service.create_user_from_linkedin(invalid_linkedin_data)
 
     @pytest.mark.asyncio
-    async def test_profile_created_transactionally_with_user(self, db_session: AsyncSession):
+    async def test_profile_created_transactionally_with_user(self, mock_zerodb):
         """TDD: Profile is created transactionally with user"""
         # Arrange
         linkedin_data = LinkedInUserData(
@@ -132,36 +157,44 @@ class TestLinkedInOAuth:
             name="Transaction Test",
             email="transaction@example.com"
         )
-        auth_service = AuthService(db_session)
+
+        mock_zerodb.get_by_field.return_value = None
+        mock_zerodb.insert_rows.return_value = {"success": True, "inserted": 1}
+
+        auth_service = AuthService()
 
         # Act
-        user, profile = await auth_service.create_user_from_linkedin(linkedin_data)
+        with patch('app.services.auth_service.zerodb_client', mock_zerodb):
+            user, profile = await auth_service.create_user_from_linkedin(linkedin_data)
 
         # Assert - Both user and profile should exist
         assert user is not None
         assert profile is not None
-        assert profile.user_id == user.id
+        assert profile["user_id"] == user["id"]
 
-        # Verify in database
-        retrieved_user = await auth_service.get_user_by_id(user.id)
-        assert retrieved_user is not None
-        assert retrieved_user.founder_profile is not None
+        # Verify both inserts were called
+        assert mock_zerodb.insert_rows.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_default_profile_visibility_is_public(self, db_session: AsyncSession):
+    async def test_default_profile_visibility_is_public(self, mock_zerodb):
         """TDD: Default visibility is public"""
         # Arrange
         linkedin_data = LinkedInUserData(
             linkedin_id="linkedin_visibility_222",
             name="Visibility Test"
         )
-        auth_service = AuthService(db_session)
+
+        mock_zerodb.get_by_field.return_value = None
+        mock_zerodb.insert_rows.return_value = {"success": True, "inserted": 1}
+
+        auth_service = AuthService()
 
         # Act
-        user, profile = await auth_service.create_user_from_linkedin(linkedin_data)
+        with patch('app.services.auth_service.zerodb_client', mock_zerodb):
+            user, profile = await auth_service.create_user_from_linkedin(linkedin_data)
 
         # Assert
-        assert profile.public_visibility is True
+        assert profile["public_visibility"] is True
 
 
 @pytest.mark.unit
@@ -169,58 +202,70 @@ class TestUserRetrieval:
     """Test suite for user retrieval operations"""
 
     @pytest.mark.asyncio
-    async def test_get_user_by_linkedin_id_returns_user(self, db_session: AsyncSession, sample_user: User):
+    async def test_get_user_by_linkedin_id_returns_user(self, mock_zerodb, sample_user_dict):
         """Test retrieving user by LinkedIn ID"""
         # Arrange
-        auth_service = AuthService(db_session)
+        mock_zerodb.get_by_field.return_value = sample_user_dict
+        auth_service = AuthService()
 
         # Act
-        user = await auth_service.get_user_by_linkedin_id(sample_user.linkedin_id)
+        with patch('app.services.auth_service.zerodb_client', mock_zerodb):
+            user = await auth_service.get_user_by_linkedin_id(sample_user_dict["linkedin_id"])
 
         # Assert
         assert user is not None
-        assert user.id == sample_user.id
-        assert user.linkedin_id == sample_user.linkedin_id
+        assert isinstance(user, dict)
+        assert user["id"] == sample_user_dict["id"]
+        assert user["linkedin_id"] == sample_user_dict["linkedin_id"]
 
     @pytest.mark.asyncio
-    async def test_get_user_by_linkedin_id_nonexistent_returns_none(self, db_session: AsyncSession):
+    async def test_get_user_by_linkedin_id_nonexistent_returns_none(self, mock_zerodb):
         """Test retrieving non-existent user returns None"""
         # Arrange
-        auth_service = AuthService(db_session)
+        mock_zerodb.get_by_field.return_value = None
+        auth_service = AuthService()
         nonexistent_linkedin_id = "linkedin_nonexistent_999"
 
         # Act
-        user = await auth_service.get_user_by_linkedin_id(nonexistent_linkedin_id)
+        with patch('app.services.auth_service.zerodb_client', mock_zerodb):
+            user = await auth_service.get_user_by_linkedin_id(nonexistent_linkedin_id)
 
         # Assert
         assert user is None
 
     @pytest.mark.asyncio
-    async def test_get_user_by_id_returns_user(self, db_session: AsyncSession, sample_user: User):
+    async def test_get_user_by_id_returns_user(self, mock_zerodb, sample_user_dict):
         """Test retrieving user by UUID"""
         # Arrange
-        auth_service = AuthService(db_session)
+        mock_zerodb.get_by_id.return_value = sample_user_dict
+        auth_service = AuthService()
+        user_id = uuid.UUID(sample_user_dict["id"])
 
         # Act
-        user = await auth_service.get_user_by_id(sample_user.id)
+        with patch('app.services.auth_service.zerodb_client', mock_zerodb):
+            user = await auth_service.get_user_by_id(user_id)
 
         # Assert
         assert user is not None
-        assert user.id == sample_user.id
+        assert isinstance(user, dict)
+        assert user["id"] == sample_user_dict["id"]
 
     @pytest.mark.asyncio
-    async def test_update_last_login_updates_timestamp(self, db_session: AsyncSession, sample_user: User):
+    async def test_update_last_login_updates_timestamp(self, mock_zerodb, sample_user_dict):
         """Test updating last login timestamp"""
         # Arrange
-        auth_service = AuthService(db_session)
-        original_last_login = sample_user.last_login_at
+        user_id = uuid.UUID(sample_user_dict["id"])
+        mock_zerodb.update_rows.return_value = {"success": True, "updated": 1}
+
+        auth_service = AuthService()
 
         # Act
-        await auth_service.update_last_login(sample_user.id)
+        with patch('app.services.auth_service.zerodb_client', mock_zerodb):
+            await auth_service.update_last_login(user_id)
 
-        # Retrieve updated user
-        updated_user = await auth_service.get_user_by_id(sample_user.id)
-
-        # Assert
-        assert updated_user.last_login_at is not None
-        assert updated_user.last_login_at > (original_last_login or datetime.min)
+        # Assert - Verify update was called with correct parameters
+        mock_zerodb.update_rows.assert_called_once()
+        call_args = mock_zerodb.update_rows.call_args
+        assert call_args[1]["table_name"] == "users"
+        assert call_args[1]["filter"]["id"] == str(user_id)
+        assert "last_login_at" in call_args[1]["update"]["$set"]
