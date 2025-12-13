@@ -1,17 +1,13 @@
 """
 Advisor Agent Service
-Handles AI advisor agent lifecycle and operations for founders
+Handles AI advisor agent lifecycle and operations using ZeroDB NoSQL + Vectors.
 """
 import uuid
 import logging
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.user import User
-from app.models.founder_profile import FounderProfile
-from app.models.advisor_agent import AdvisorAgent, AgentMemory, AgentStatus, MemoryType
+from app.models.advisor_agent import AgentStatus, MemoryType
 from app.schemas.advisor_agent import (
     AgentMemoryCreate,
     AdvisorAgentUpdate,
@@ -19,45 +15,55 @@ from app.schemas.advisor_agent import (
     WeeklyOpportunitySummary
 )
 from app.services.zerodb_service import zerodb_service
+from app.services.zerodb_client import zerodb_client
 from app.services.embedding_service import embedding_service
+from app.core.enums import AutonomyMode
 
 logger = logging.getLogger(__name__)
 
 
 class AdvisorAgentService:
     """
-    Service for advisor agent management.
+    Service for advisor agent management using ZeroDB.
 
     Each founder has one advisor agent that:
-    - Has isolated memory (scoped by agent_id in ZeroDB)
+    - Has isolated memory (scoped by agent_id in ZeroDB vectors)
     - Cannot act without checking user's autonomy_mode permissions
     - Generates weekly opportunity summaries
     - Learns from interaction outcomes
+
+    Data Storage:
+    - Agent records: ZeroDB NoSQL table 'advisor_agents'
+    - Agent memories: ZeroDB NoSQL table 'agent_memories'
+    - Semantic search: ZeroDB vectors with agent-scoped namespaces
     """
 
-    def __init__(self, db: AsyncSession):
-        self.db = db
+    def __init__(self):
+        """Initialize advisor agent service with ZeroDB clients."""
         self.zerodb = zerodb_service
+        self.zerodb_client = zerodb_client
         self.embedding_service = embedding_service
 
-    async def initialize_agent(self, user_id: uuid.UUID) -> AdvisorAgent:
+    async def initialize_agent(self, user_id: uuid.UUID) -> Dict[str, Any]:
         """
         Initialize a new advisor agent for a user.
 
-        This creates the agent in INITIALIZING status and sets up
+        Creates the agent in INITIALIZING status and sets up
         isolated memory namespace in ZeroDB.
 
         Args:
             user_id: User UUID
 
         Returns:
-            Newly created AdvisorAgent
+            Newly created agent dictionary
 
         Raises:
             ValueError: If user not found or already has an agent
         """
+        user_id_str = str(user_id)
+
         # Verify user exists
-        user = await self.db.get(User, user_id)
+        user = await self.zerodb_client.get_by_id("users", user_id_str)
         if not user:
             raise ValueError("User not found")
 
@@ -67,25 +73,33 @@ class AdvisorAgentService:
             raise ValueError("User already has an advisor agent")
 
         # Create agent with isolated memory namespace
-        agent = AdvisorAgent(
-            user_id=user_id,
-            status=AgentStatus.INITIALIZING,
-            name="Advisor",
-            memory_namespace=f"agent_{str(user_id)}",
-            total_memories=0,
-            total_suggestions=0,
-            total_actions=0,
-            is_enabled=True
-        )
+        agent_id = str(uuid.uuid4())
+        now = datetime.utcnow().isoformat()
 
-        self.db.add(agent)
-        await self.db.flush()
+        agent_data = {
+            "id": agent_id,
+            "user_id": user_id_str,
+            "status": AgentStatus.INITIALIZING.value,
+            "name": "Advisor",
+            "description": None,
+            "memory_namespace": f"agent_{user_id_str}",
+            "total_memories": 0,
+            "last_memory_at": None,
+            "last_active_at": None,
+            "last_summary_at": None,
+            "total_suggestions": 0,
+            "total_actions": 0,
+            "is_enabled": True,
+            "created_at": now,
+            "updated_at": now
+        }
 
-        logger.info(f"Initialized advisor agent {agent.id} for user {user_id}")
+        await self.zerodb_client.insert_rows("advisor_agents", [agent_data])
+        logger.info(f"Initialized advisor agent {agent_id} for user {user_id}")
 
-        return agent
+        return agent_data
 
-    async def get_agent_by_user_id(self, user_id: uuid.UUID) -> Optional[AdvisorAgent]:
+    async def get_agent_by_user_id(self, user_id: uuid.UUID) -> Optional[Dict[str, Any]]:
         """
         Get advisor agent by user ID.
 
@@ -93,13 +107,16 @@ class AdvisorAgentService:
             user_id: User UUID
 
         Returns:
-            AdvisorAgent if found, None otherwise
+            Agent dictionary if found, None otherwise
         """
-        stmt = select(AdvisorAgent).where(AdvisorAgent.user_id == user_id)
-        result = await self.db.execute(stmt)
-        return result.scalar_one_or_none()
+        agents = await self.zerodb_client.query_rows(
+            table_name="advisor_agents",
+            filter={"user_id": str(user_id)},
+            limit=1
+        )
+        return agents[0] if agents else None
 
-    async def get_agent(self, agent_id: uuid.UUID) -> Optional[AdvisorAgent]:
+    async def get_agent(self, agent_id: uuid.UUID) -> Optional[Dict[str, Any]]:
         """
         Get advisor agent by ID.
 
@@ -107,11 +124,11 @@ class AdvisorAgentService:
             agent_id: Agent UUID
 
         Returns:
-            AdvisorAgent if found, None otherwise
+            Agent dictionary if found, None otherwise
         """
-        return await self.db.get(AdvisorAgent, agent_id)
+        return await self.zerodb_client.get_by_id("advisor_agents", str(agent_id))
 
-    async def activate_agent(self, agent_id: uuid.UUID) -> AdvisorAgent:
+    async def activate_agent(self, agent_id: uuid.UUID) -> Dict[str, Any]:
         """
         Activate an advisor agent.
 
@@ -119,22 +136,33 @@ class AdvisorAgentService:
             agent_id: Agent UUID
 
         Returns:
-            Updated AdvisorAgent
+            Updated agent dictionary
 
         Raises:
             ValueError: If agent not found
         """
-        agent = await self.db.get(AdvisorAgent, agent_id)
+        agent = await self.get_agent(agent_id)
         if not agent:
             raise ValueError("Agent not found")
 
-        agent.activate()
-        await self.db.flush()
+        now = datetime.utcnow().isoformat()
+        update_data = {
+            "status": AgentStatus.ACTIVE.value,
+            "last_active_at": now,
+            "updated_at": now
+        }
 
+        await self.zerodb_client.update_rows(
+            table_name="advisor_agents",
+            filter={"id": str(agent_id)},
+            update={"$set": update_data}
+        )
+
+        agent.update(update_data)
         logger.info(f"Activated advisor agent {agent_id}")
         return agent
 
-    async def deactivate_agent(self, agent_id: uuid.UUID) -> AdvisorAgent:
+    async def deactivate_agent(self, agent_id: uuid.UUID) -> Dict[str, Any]:
         """
         Deactivate an advisor agent.
 
@@ -142,18 +170,28 @@ class AdvisorAgentService:
             agent_id: Agent UUID
 
         Returns:
-            Updated AdvisorAgent
+            Updated agent dictionary
 
         Raises:
             ValueError: If agent not found
         """
-        agent = await self.db.get(AdvisorAgent, agent_id)
+        agent = await self.get_agent(agent_id)
         if not agent:
             raise ValueError("Agent not found")
 
-        agent.deactivate()
-        await self.db.flush()
+        now = datetime.utcnow().isoformat()
+        update_data = {
+            "status": AgentStatus.DEACTIVATED.value,
+            "updated_at": now
+        }
 
+        await self.zerodb_client.update_rows(
+            table_name="advisor_agents",
+            filter={"id": str(agent_id)},
+            update={"$set": update_data}
+        )
+
+        agent.update(update_data)
         logger.info(f"Deactivated advisor agent {agent_id}")
         return agent
 
@@ -161,7 +199,7 @@ class AdvisorAgentService:
         self,
         agent_id: uuid.UUID,
         update_data: AdvisorAgentUpdate
-    ) -> AdvisorAgent:
+    ) -> Dict[str, Any]:
         """
         Update advisor agent settings.
 
@@ -170,22 +208,25 @@ class AdvisorAgentService:
             update_data: Update data
 
         Returns:
-            Updated AdvisorAgent
+            Updated agent dictionary
 
         Raises:
             ValueError: If agent not found
         """
-        agent = await self.db.get(AdvisorAgent, agent_id)
+        agent = await self.get_agent(agent_id)
         if not agent:
             raise ValueError("Agent not found")
 
         update_dict = update_data.model_dump(exclude_unset=True)
-        for field, value in update_dict.items():
-            setattr(agent, field, value)
+        update_dict["updated_at"] = datetime.utcnow().isoformat()
 
-        agent.updated_at = datetime.utcnow()
-        await self.db.flush()
+        await self.zerodb_client.update_rows(
+            table_name="advisor_agents",
+            filter={"id": str(agent_id)},
+            update={"$set": update_dict}
+        )
 
+        agent.update(update_dict)
         logger.info(f"Updated advisor agent {agent_id}")
         return agent
 
@@ -204,30 +245,37 @@ class AdvisorAgentService:
         Returns:
             Tuple of (allowed, reason)
         """
-        agent = await self.db.get(AdvisorAgent, agent_id)
+        agent = await self.get_agent(agent_id)
         if not agent:
             return False, "Agent not found"
 
-        if not agent.is_enabled:
+        if not agent.get("is_enabled", False):
             return False, "Agent is disabled"
 
-        if agent.status != AgentStatus.ACTIVE:
-            return False, f"Agent is not active (status: {agent.status.value})"
+        status = agent.get("status")
+        if status != AgentStatus.ACTIVE.value:
+            return False, f"Agent is not active (status: {status})"
 
         # Get user's founder profile for autonomy mode
-        profile = await self.db.get(FounderProfile, agent.user_id)
-        if not profile:
+        profiles = await self.zerodb_client.query_rows(
+            table_name="founder_profiles",
+            filter={"user_id": agent.get("user_id")},
+            limit=1
+        )
+
+        if not profiles:
             return False, "Founder profile not found"
 
-        autonomy_mode = profile.autonomy_mode.value
+        profile = profiles[0]
+        autonomy_mode = profile.get("autonomy_mode", AutonomyMode.SUGGEST.value)
 
         if action_type == "suggest":
-            if agent.can_suggest(autonomy_mode):
+            if autonomy_mode in (AutonomyMode.SUGGEST.value, AutonomyMode.APPROVE.value, AutonomyMode.AUTO.value):
                 return True, "Suggestions allowed"
             return False, f"Suggestions not allowed in {autonomy_mode} mode"
 
         if action_type == "act":
-            if agent.can_act_autonomously(autonomy_mode):
+            if autonomy_mode == AutonomyMode.AUTO.value:
                 return True, "Autonomous action allowed"
             return False, f"Autonomous action not allowed in {autonomy_mode} mode"
 
@@ -237,76 +285,92 @@ class AdvisorAgentService:
         self,
         agent_id: uuid.UUID,
         memory_data: AgentMemoryCreate
-    ) -> AgentMemory:
+    ) -> Dict[str, Any]:
         """
         Store a new memory for the agent.
 
-        Creates relational record and generates vector embedding in ZeroDB.
+        Creates NoSQL record and generates vector embedding in ZeroDB.
 
         Args:
             agent_id: Agent UUID
             memory_data: Memory creation data
 
         Returns:
-            Created AgentMemory
+            Created memory dictionary
 
         Raises:
             ValueError: If agent not found
         """
-        agent = await self.db.get(AdvisorAgent, agent_id)
+        agent = await self.get_agent(agent_id)
         if not agent:
             raise ValueError("Agent not found")
 
-        # Create memory record
-        memory = AgentMemory(
-            agent_id=agent_id,
-            memory_type=memory_data.memory_type,
-            content=memory_data.content,
-            summary=memory_data.summary,
-            confidence=memory_data.confidence,
-            source_type=memory_data.source_type,
-            source_id=memory_data.source_id,
-            expires_at=memory_data.expires_at
-        )
+        agent_id_str = str(agent_id)
+        memory_id = str(uuid.uuid4())
+        now = datetime.utcnow().isoformat()
 
-        self.db.add(memory)
-        await self.db.flush()
+        # Prepare memory content for embedding
+        embedding_content = f"{memory_data.memory_type.value}: {memory_data.content}"
+
+        # Create memory record
+        memory = {
+            "id": memory_id,
+            "agent_id": agent_id_str,
+            "memory_type": memory_data.memory_type.value,
+            "content": memory_data.content,
+            "summary": memory_data.summary,
+            "embedding_id": None,
+            "confidence": memory_data.confidence,
+            "source_type": memory_data.source_type,
+            "source_id": str(memory_data.source_id) if memory_data.source_id else None,
+            "created_at": now,
+            "expires_at": memory_data.expires_at.isoformat() if memory_data.expires_at else None
+        }
 
         try:
             # Generate embedding for semantic search
-            embedding = await self.embedding_service.generate_embedding(
-                memory.embedding_content
-            )
+            embedding = await self.embedding_service.generate_embedding(embedding_content)
 
-            # Store in ZeroDB with agent-scoped namespace
+            # Store in ZeroDB vectors with agent-scoped namespace
             vector_id = await self.zerodb.upsert_vector(
                 entity_type="agent_memory",
-                entity_id=memory.id,
+                entity_id=uuid.UUID(memory_id),
                 embedding=embedding,
-                document=memory.embedding_content,
+                document=embedding_content,
                 metadata=self.zerodb.prepare_metadata(
                     entity_type="agent_memory",
-                    source_id=memory.id,
-                    user_id=agent.user_id,
-                    agent_id=str(agent_id),
-                    memory_type=memory.memory_type.value,
-                    namespace=agent.memory_namespace
+                    source_id=uuid.UUID(memory_id),
+                    user_id=uuid.UUID(agent.get("user_id")),
+                    agent_id=agent_id_str,
+                    memory_type=memory_data.memory_type.value,
+                    namespace=agent.get("memory_namespace")
                 )
             )
 
-            memory.embedding_id = vector_id
-
-            # Update agent stats
-            agent.total_memories += 1
-            agent.last_memory_at = datetime.utcnow()
-
-            await self.db.flush()
+            memory["embedding_id"] = vector_id
 
         except Exception as e:
-            logger.warning(f"Failed to create embedding for memory {memory.id}: {e}")
-            # Continue without embedding - memory is still stored in relational DB
+            logger.warning(f"Failed to create embedding for memory {memory_id}: {e}")
+            # Continue without embedding - memory is still stored in NoSQL
 
-        logger.info(f"Stored memory {memory.id} for agent {agent_id}")
+        # Insert memory record
+        await self.zerodb_client.insert_rows("agent_memories", [memory])
+
+        # Update agent stats
+        agent_now = datetime.utcnow().isoformat()
+        await self.zerodb_client.update_rows(
+            table_name="advisor_agents",
+            filter={"id": agent_id_str},
+            update={
+                "$set": {
+                    "total_memories": agent.get("total_memories", 0) + 1,
+                    "last_memory_at": agent_now,
+                    "updated_at": agent_now
+                }
+            }
+        )
+
+        logger.info(f"Stored memory {memory_id} for agent {agent_id}")
         return memory
 
     async def search_memories(
@@ -315,7 +379,7 @@ class AdvisorAgentService:
         query: str,
         memory_type: Optional[MemoryType] = None,
         limit: int = 10
-    ) -> List[AgentMemory]:
+    ) -> List[Dict[str, Any]]:
         """
         Search agent memories using semantic similarity.
 
@@ -326,9 +390,9 @@ class AdvisorAgentService:
             limit: Maximum results
 
         Returns:
-            List of matching AgentMemory records
+            List of matching memory records
         """
-        agent = await self.db.get(AdvisorAgent, agent_id)
+        agent = await self.get_agent(agent_id)
         if not agent:
             return []
 
@@ -339,12 +403,12 @@ class AdvisorAgentService:
             # Build metadata filters
             filters = {
                 "agent_id": str(agent_id),
-                "namespace": agent.memory_namespace
+                "namespace": agent.get("memory_namespace")
             }
             if memory_type:
                 filters["memory_type"] = memory_type.value
 
-            # Search in ZeroDB
+            # Search in ZeroDB vectors
             results = await self.zerodb.search_vectors(
                 query_vector=query_embedding,
                 entity_type="agent_memory",
@@ -354,7 +418,7 @@ class AdvisorAgentService:
 
             # Fetch full memory records
             memory_ids = [
-                uuid.UUID(r["metadata"]["source_id"])
+                r["metadata"]["source_id"]
                 for r in results
                 if "metadata" in r and "source_id" in r["metadata"]
             ]
@@ -362,19 +426,19 @@ class AdvisorAgentService:
             if not memory_ids:
                 return []
 
-            stmt = select(AgentMemory).where(AgentMemory.id.in_(memory_ids))
-            result = await self.db.execute(stmt)
-            return list(result.scalars().all())
+            # Query memories by IDs
+            memories = []
+            for mid in memory_ids:
+                memory = await self.zerodb_client.get_by_id("agent_memories", mid)
+                if memory:
+                    memories.append(memory)
+
+            return memories
 
         except Exception as e:
             logger.warning(f"Memory search failed for agent {agent_id}: {e}")
             # Fallback to basic query
-            stmt = select(AgentMemory).where(AgentMemory.agent_id == agent_id)
-            if memory_type:
-                stmt = stmt.where(AgentMemory.memory_type == memory_type)
-            stmt = stmt.limit(limit)
-            result = await self.db.execute(stmt)
-            return list(result.scalars().all())
+            return await self.get_memories(agent_id, memory_type, limit)
 
     async def get_memories(
         self,
@@ -382,7 +446,7 @@ class AdvisorAgentService:
         memory_type: Optional[MemoryType] = None,
         limit: int = 50,
         offset: int = 0
-    ) -> List[AgentMemory]:
+    ) -> List[Dict[str, Any]]:
         """
         Get agent memories with optional filtering.
 
@@ -393,18 +457,21 @@ class AdvisorAgentService:
             offset: Pagination offset
 
         Returns:
-            List of AgentMemory records
+            List of memory records
         """
-        stmt = select(AgentMemory).where(AgentMemory.agent_id == agent_id)
-
+        filter_query = {"agent_id": str(agent_id)}
         if memory_type:
-            stmt = stmt.where(AgentMemory.memory_type == memory_type)
+            filter_query["memory_type"] = memory_type.value
 
-        stmt = stmt.order_by(AgentMemory.created_at.desc())
-        stmt = stmt.limit(limit).offset(offset)
+        memories = await self.zerodb_client.query_rows(
+            table_name="agent_memories",
+            filter=filter_query,
+            limit=limit,
+            offset=offset,
+            sort={"created_at": -1}  # Newest first
+        )
 
-        result = await self.db.execute(stmt)
-        return list(result.scalars().all())
+        return memories
 
     async def generate_weekly_summary(
         self,
@@ -428,7 +495,7 @@ class AdvisorAgentService:
         Raises:
             ValueError: If agent not found
         """
-        agent = await self.db.get(AdvisorAgent, agent_id)
+        agent = await self.get_agent(agent_id)
         if not agent:
             raise ValueError("Agent not found")
 
@@ -458,8 +525,12 @@ class AdvisorAgentService:
         }
 
         # Update agent's last summary timestamp
-        agent.last_summary_at = now
-        await self.db.flush()
+        now_iso = now.isoformat()
+        await self.zerodb_client.update_rows(
+            table_name="advisor_agents",
+            filter={"id": str(agent_id)},
+            update={"$set": {"last_summary_at": now_iso, "updated_at": now_iso}}
+        )
 
         logger.info(f"Generated weekly summary for agent {agent_id}")
 
@@ -475,17 +546,37 @@ class AdvisorAgentService:
 
     async def record_suggestion(self, agent_id: uuid.UUID) -> None:
         """Record that agent made a suggestion."""
-        agent = await self.db.get(AdvisorAgent, agent_id)
+        agent = await self.get_agent(agent_id)
         if agent:
-            agent.record_suggestion()
-            await self.db.flush()
+            now = datetime.utcnow().isoformat()
+            await self.zerodb_client.update_rows(
+                table_name="advisor_agents",
+                filter={"id": str(agent_id)},
+                update={
+                    "$set": {
+                        "total_suggestions": agent.get("total_suggestions", 0) + 1,
+                        "last_active_at": now,
+                        "updated_at": now
+                    }
+                }
+            )
 
     async def record_action(self, agent_id: uuid.UUID) -> None:
         """Record that agent took an action."""
-        agent = await self.db.get(AdvisorAgent, agent_id)
+        agent = await self.get_agent(agent_id)
         if agent:
-            agent.record_action()
-            await self.db.flush()
+            now = datetime.utcnow().isoformat()
+            await self.zerodb_client.update_rows(
+                table_name="advisor_agents",
+                filter={"id": str(agent_id)},
+                update={
+                    "$set": {
+                        "total_actions": agent.get("total_actions", 0) + 1,
+                        "last_active_at": now,
+                        "updated_at": now
+                    }
+                }
+            )
 
     async def learn_from_outcome(
         self,
@@ -493,7 +584,7 @@ class AdvisorAgentService:
         outcome_type: str,
         success: bool,
         context: Dict[str, Any]
-    ) -> AgentMemory:
+    ) -> Dict[str, Any]:
         """
         Learn from an interaction outcome.
 
@@ -507,7 +598,7 @@ class AdvisorAgentService:
             context: Additional context about the outcome
 
         Returns:
-            Created AgentMemory
+            Created memory dictionary
         """
         content = f"Outcome: {outcome_type} - {'Success' if success else 'Failure'}. Context: {context}"
         summary = f"{outcome_type}: {'positive' if success else 'negative'} outcome"
@@ -521,3 +612,7 @@ class AdvisorAgentService:
         )
 
         return await self.store_memory(agent_id, memory_data)
+
+
+# Singleton instance for stateless service
+advisor_agent_service = AdvisorAgentService()

@@ -1,19 +1,17 @@
 """
 BDD Scenarios for Sprint 4: Virtual Advisor Agent
 Behavior-Driven Development tests for advisor agent initialization and weekly summaries
+Uses ZeroDB NoSQL + Vectors (not PostgreSQL)
 """
 import pytest
 import uuid
 from datetime import datetime
-from httpx import AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession
-from unittest.mock import patch, Mock, AsyncMock
+from unittest.mock import patch, AsyncMock
 
-from app.models.user import User
-from app.models.founder_profile import FounderProfile, AutonomyMode
-from app.models.advisor_agent import AdvisorAgent, AgentStatus, MemoryType
+from app.models.advisor_agent import AgentStatus, MemoryType
 from app.services.advisor_agent_service import AdvisorAgentService
-from app.core.security import create_access_token
+from app.schemas.advisor_agent import AgentMemoryCreate
+from app.core.enums import AutonomyMode
 
 
 @pytest.mark.bdd
@@ -26,7 +24,7 @@ class TestStory6_1_InitializeAdvisorAgent:
 
     @pytest.mark.asyncio
     async def test_scenario_agent_created_with_isolated_memory(
-        self, db_session: AsyncSession, sample_user_with_profile
+        self, mock_zerodb_client, sample_user_with_profile_and_agent_dict
     ):
         """
         Scenario: Agent has isolated memory namespace
@@ -35,20 +33,24 @@ class TestStory6_1_InitializeAdvisorAgent:
         Then it has a unique memory namespace scoped to my user ID
         """
         # Given: I have a founder profile
-        user, profile = sample_user_with_profile
-        service = AdvisorAgentService(db_session)
+        user, profile, _ = sample_user_with_profile_and_agent_dict
+
+        # Configure mock
+        mock_zerodb_client.get_by_id.return_value = user
+        mock_zerodb_client.query_rows.return_value = []  # No existing agent
+
+        service = AdvisorAgentService()
 
         # When: My advisor agent is initialized
-        agent = await service.initialize_agent(user.id)
-        await db_session.commit()
+        agent = await service.initialize_agent(uuid.UUID(user["id"]))
 
         # Then: It has a unique memory namespace scoped to my user ID
-        assert agent.memory_namespace == f"agent_{str(user.id)}"
-        assert agent.memory_namespace != f"agent_{str(uuid.uuid4())}"  # Different from other users
+        assert agent["memory_namespace"] == f"agent_{user['id']}"
+        assert agent["memory_namespace"] != f"agent_{str(uuid.uuid4())}"
 
     @pytest.mark.asyncio
     async def test_scenario_agent_respects_autonomy_mode_suggest(
-        self, db_session: AsyncSession, sample_user_with_profile_and_agent
+        self, mock_zerodb_client, sample_user_with_profile_and_agent_dict
     ):
         """
         Scenario: Agent respects suggest autonomy mode
@@ -58,27 +60,33 @@ class TestStory6_1_InitializeAdvisorAgent:
         And it is NOT allowed to act autonomously
         """
         # Given: My autonomy mode is "suggest"
-        user, profile, agent = sample_user_with_profile_and_agent
-        profile.autonomy_mode = AutonomyMode.SUGGEST
-        await db_session.commit()
+        user, profile, agent = sample_user_with_profile_and_agent_dict
+        profile["autonomy_mode"] = AutonomyMode.SUGGEST.value
 
-        service = AdvisorAgentService(db_session)
+        mock_zerodb_client.get_by_id.return_value = agent
+        mock_zerodb_client.query_rows.return_value = [profile]
+
+        service = AdvisorAgentService()
 
         # When: The agent wants to make a suggestion
-        suggest_allowed, suggest_reason = await service.check_permission(agent.id, "suggest")
+        suggest_allowed, suggest_reason = await service.check_permission(
+            uuid.UUID(agent["id"]), "suggest"
+        )
 
         # Then: It is allowed to suggest
         assert suggest_allowed is True
 
         # When: The agent wants to act autonomously
-        act_allowed, act_reason = await service.check_permission(agent.id, "act")
+        act_allowed, act_reason = await service.check_permission(
+            uuid.UUID(agent["id"]), "act"
+        )
 
         # Then: It is NOT allowed to act autonomously
         assert act_allowed is False
 
     @pytest.mark.asyncio
     async def test_scenario_agent_respects_autonomy_mode_approve(
-        self, db_session: AsyncSession, sample_user_with_profile_and_agent
+        self, mock_zerodb_client, sample_user_with_profile_and_agent_dict
     ):
         """
         Scenario: Agent respects approve autonomy mode
@@ -87,14 +95,18 @@ class TestStory6_1_InitializeAdvisorAgent:
         Then it must wait for my approval
         """
         # Given: My autonomy mode is "approve"
-        user, profile, agent = sample_user_with_profile_and_agent
-        profile.autonomy_mode = AutonomyMode.APPROVE
-        await db_session.commit()
+        user, profile, agent = sample_user_with_profile_and_agent_dict
+        profile["autonomy_mode"] = AutonomyMode.APPROVE.value
 
-        service = AdvisorAgentService(db_session)
+        mock_zerodb_client.get_by_id.return_value = agent
+        mock_zerodb_client.query_rows.return_value = [profile]
+
+        service = AdvisorAgentService()
 
         # When: The agent wants to act
-        act_allowed, act_reason = await service.check_permission(agent.id, "act")
+        act_allowed, act_reason = await service.check_permission(
+            uuid.UUID(agent["id"]), "act"
+        )
 
         # Then: It must wait for approval (not allowed to act autonomously)
         assert act_allowed is False
@@ -102,7 +114,7 @@ class TestStory6_1_InitializeAdvisorAgent:
 
     @pytest.mark.asyncio
     async def test_scenario_agent_can_act_in_auto_mode(
-        self, db_session: AsyncSession, sample_user_with_profile_and_agent
+        self, mock_zerodb_client, sample_user_with_profile_and_agent_dict
     ):
         """
         Scenario: Agent can act autonomously in auto mode
@@ -111,14 +123,18 @@ class TestStory6_1_InitializeAdvisorAgent:
         Then it can proceed without my approval
         """
         # Given: My autonomy mode is "auto"
-        user, profile, agent = sample_user_with_profile_and_agent
-        profile.autonomy_mode = AutonomyMode.AUTO
-        await db_session.commit()
+        user, profile, agent = sample_user_with_profile_and_agent_dict
+        profile["autonomy_mode"] = AutonomyMode.AUTO.value
 
-        service = AdvisorAgentService(db_session)
+        mock_zerodb_client.get_by_id.return_value = agent
+        mock_zerodb_client.query_rows.return_value = [profile]
+
+        service = AdvisorAgentService()
 
         # When: The agent wants to act
-        act_allowed, act_reason = await service.check_permission(agent.id, "act")
+        act_allowed, act_reason = await service.check_permission(
+            uuid.UUID(agent["id"]), "act"
+        )
 
         # Then: It can proceed without my approval
         assert act_allowed is True
@@ -126,7 +142,11 @@ class TestStory6_1_InitializeAdvisorAgent:
 
     @pytest.mark.asyncio
     async def test_scenario_agent_stores_memory_with_embedding(
-        self, db_session: AsyncSession, sample_user_with_profile_and_agent
+        self,
+        mock_zerodb_client,
+        mock_zerodb_vector_service,
+        mock_embedding_service,
+        sample_user_with_profile_and_agent_dict
     ):
         """
         Scenario: Agent stores memory with vector embedding
@@ -135,34 +155,28 @@ class TestStory6_1_InitializeAdvisorAgent:
         Then it stores the memory with a semantic embedding
         """
         # Given: My agent is active
-        user, profile, agent = sample_user_with_profile_and_agent
-        service = AdvisorAgentService(db_session)
+        user, profile, agent = sample_user_with_profile_and_agent_dict
 
-        # Mock the embedding and vector services
-        with patch.object(service.embedding_service, 'generate_embedding', new_callable=AsyncMock) as mock_embed:
-            mock_embed.return_value = [0.1] * 1536
+        mock_zerodb_client.get_by_id.return_value = agent
 
-            with patch.object(service.zerodb, 'upsert_vector', new_callable=AsyncMock) as mock_upsert:
-                mock_upsert.return_value = "vec_preference_123"
+        service = AdvisorAgentService()
 
-                # When: It learns something about my preferences
-                from app.schemas.advisor_agent import AgentMemoryCreate
-                memory_data = AgentMemoryCreate(
-                    memory_type=MemoryType.PREFERENCE,
-                    content="User prefers introductions in the morning",
-                    summary="Morning intro preference",
-                    confidence=85
-                )
+        # When: It learns something about my preferences
+        memory_data = AgentMemoryCreate(
+            memory_type=MemoryType.PREFERENCE,
+            content="User prefers introductions in the morning",
+            summary="Morning intro preference",
+            confidence=85
+        )
 
-                memory = await service.store_memory(agent.id, memory_data)
-                await db_session.commit()
+        memory = await service.store_memory(uuid.UUID(agent["id"]), memory_data)
 
         # Then: It stores the memory with a semantic embedding
         assert memory is not None
-        assert memory.embedding_id == "vec_preference_123"
-        assert memory.memory_type == MemoryType.PREFERENCE
-        mock_embed.assert_called_once()
-        mock_upsert.assert_called_once()
+        assert memory["embedding_id"] == "vec_test_123"
+        assert memory["memory_type"] == MemoryType.PREFERENCE.value
+        mock_embedding_service.generate_embedding.assert_called_once()
+        mock_zerodb_vector_service.upsert_vector.assert_called_once()
 
 
 @pytest.mark.bdd
@@ -175,7 +189,7 @@ class TestStory6_2_WeeklyOpportunitySummary:
 
     @pytest.mark.asyncio
     async def test_scenario_summary_is_reproducible(
-        self, db_session: AsyncSession, sample_user_with_profile_and_agent
+        self, mock_zerodb_client, sample_user_with_profile_and_agent_dict
     ):
         """
         Scenario: Summary is reproducible
@@ -185,12 +199,15 @@ class TestStory6_2_WeeklyOpportunitySummary:
         And it is based on my agent's memories
         """
         # Given: I request a weekly summary
-        user, profile, agent = sample_user_with_profile_and_agent
-        service = AdvisorAgentService(db_session)
+        user, profile, agent = sample_user_with_profile_and_agent_dict
+
+        mock_zerodb_client.get_by_id.return_value = agent
+        mock_zerodb_client.query_rows.return_value = []  # No recent memories
+
+        service = AdvisorAgentService()
 
         # When: The summary is generated
-        summary = await service.generate_weekly_summary(agent.id)
-        await db_session.commit()
+        summary = await service.generate_weekly_summary(uuid.UUID(agent["id"]))
 
         # Then: It includes a defined time period
         assert summary.period_start is not None
@@ -206,7 +223,7 @@ class TestStory6_2_WeeklyOpportunitySummary:
 
     @pytest.mark.asyncio
     async def test_scenario_summary_updates_agent_timestamp(
-        self, db_session: AsyncSession, sample_user_with_profile_and_agent
+        self, mock_zerodb_client, sample_user_with_profile_and_agent_dict
     ):
         """
         Scenario: Summary generation updates timestamp
@@ -215,19 +232,20 @@ class TestStory6_2_WeeklyOpportunitySummary:
         Then the agent's last_summary_at is updated
         """
         # Given: I have an active agent
-        user, profile, agent = sample_user_with_profile_and_agent
-        original_summary_at = agent.last_summary_at
-        service = AdvisorAgentService(db_session)
+        user, profile, agent = sample_user_with_profile_and_agent_dict
+
+        mock_zerodb_client.get_by_id.return_value = agent
+        mock_zerodb_client.query_rows.return_value = []
+
+        service = AdvisorAgentService()
 
         # When: I request a weekly summary
-        await service.generate_weekly_summary(agent.id)
-        await db_session.commit()
-        await db_session.refresh(agent)
+        await service.generate_weekly_summary(uuid.UUID(agent["id"]))
 
-        # Then: The agent's last_summary_at is updated
-        assert agent.last_summary_at is not None
-        if original_summary_at:
-            assert agent.last_summary_at > original_summary_at
+        # Then: The agent's last_summary_at is updated (via update_rows call)
+        mock_zerodb_client.update_rows.assert_called()
+        update_call = mock_zerodb_client.update_rows.call_args
+        assert "last_summary_at" in update_call.kwargs["update"]["$set"]
 
 
 @pytest.mark.bdd
@@ -238,7 +256,11 @@ class TestAgentLearningFromOutcomes:
 
     @pytest.mark.asyncio
     async def test_scenario_agent_learns_from_successful_intro(
-        self, db_session: AsyncSession, sample_user_with_profile_and_agent
+        self,
+        mock_zerodb_client,
+        mock_zerodb_vector_service,
+        mock_embedding_service,
+        sample_user_with_profile_and_agent_dict
     ):
         """
         Scenario: Agent learns from successful introduction
@@ -247,34 +269,33 @@ class TestAgentLearningFromOutcomes:
         Then my agent stores a positive outcome memory
         """
         # Given: An introduction I made was successful
-        user, profile, agent = sample_user_with_profile_and_agent
-        service = AdvisorAgentService(db_session)
+        user, profile, agent = sample_user_with_profile_and_agent_dict
 
-        # Mock services
-        with patch.object(service.embedding_service, 'generate_embedding', new_callable=AsyncMock) as mock_embed:
-            mock_embed.return_value = [0.1] * 1536
+        mock_zerodb_client.get_by_id.return_value = agent
 
-            with patch.object(service.zerodb, 'upsert_vector', new_callable=AsyncMock) as mock_upsert:
-                mock_upsert.return_value = "vec_outcome_success"
+        service = AdvisorAgentService()
 
-                # When: The outcome is recorded
-                memory = await service.learn_from_outcome(
-                    agent.id,
-                    outcome_type="introduction",
-                    success=True,
-                    context={"partner_industry": "fintech", "meeting_scheduled": True}
-                )
-                await db_session.commit()
+        # When: The outcome is recorded
+        memory = await service.learn_from_outcome(
+            uuid.UUID(agent["id"]),
+            outcome_type="introduction",
+            success=True,
+            context={"partner_industry": "fintech", "meeting_scheduled": True}
+        )
 
         # Then: My agent stores a positive outcome memory
         assert memory is not None
-        assert memory.memory_type == MemoryType.OUTCOME
-        assert "Success" in memory.content
-        assert memory.confidence == 80  # Higher confidence for success
+        assert memory["memory_type"] == MemoryType.OUTCOME.value
+        assert "Success" in memory["content"]
+        assert memory["confidence"] == 80  # Higher confidence for success
 
     @pytest.mark.asyncio
     async def test_scenario_agent_learns_from_failed_intro(
-        self, db_session: AsyncSession, sample_user_with_profile_and_agent
+        self,
+        mock_zerodb_client,
+        mock_zerodb_vector_service,
+        mock_embedding_service,
+        sample_user_with_profile_and_agent_dict
     ):
         """
         Scenario: Agent learns from failed introduction
@@ -283,30 +304,25 @@ class TestAgentLearningFromOutcomes:
         Then my agent stores a learning memory with lower confidence
         """
         # Given: An introduction I made was not successful
-        user, profile, agent = sample_user_with_profile_and_agent
-        service = AdvisorAgentService(db_session)
+        user, profile, agent = sample_user_with_profile_and_agent_dict
 
-        # Mock services
-        with patch.object(service.embedding_service, 'generate_embedding', new_callable=AsyncMock) as mock_embed:
-            mock_embed.return_value = [0.1] * 1536
+        mock_zerodb_client.get_by_id.return_value = agent
 
-            with patch.object(service.zerodb, 'upsert_vector', new_callable=AsyncMock) as mock_upsert:
-                mock_upsert.return_value = "vec_outcome_failure"
+        service = AdvisorAgentService()
 
-                # When: The outcome is recorded
-                memory = await service.learn_from_outcome(
-                    agent.id,
-                    outcome_type="introduction",
-                    success=False,
-                    context={"reason": "timing_mismatch", "partner_busy": True}
-                )
-                await db_session.commit()
+        # When: The outcome is recorded
+        memory = await service.learn_from_outcome(
+            uuid.UUID(agent["id"]),
+            outcome_type="introduction",
+            success=False,
+            context={"reason": "timing_mismatch", "partner_busy": True}
+        )
 
         # Then: My agent stores a learning memory with lower confidence
         assert memory is not None
-        assert memory.memory_type == MemoryType.OUTCOME
-        assert "Failure" in memory.content
-        assert memory.confidence == 60  # Lower confidence for failure
+        assert memory["memory_type"] == MemoryType.OUTCOME.value
+        assert "Failure" in memory["content"]
+        assert memory["confidence"] == 60  # Lower confidence for failure
 
 
 @pytest.mark.bdd
@@ -317,7 +333,7 @@ class TestAgentDisabledBehavior:
 
     @pytest.mark.asyncio
     async def test_scenario_disabled_agent_cannot_suggest(
-        self, db_session: AsyncSession, sample_user_with_profile_and_agent
+        self, mock_zerodb_client, sample_user_with_profile_and_agent_dict
     ):
         """
         Scenario: Disabled agent cannot make suggestions
@@ -326,14 +342,17 @@ class TestAgentDisabledBehavior:
         Then the suggestion is blocked
         """
         # Given: I have disabled my advisor agent
-        user, profile, agent = sample_user_with_profile_and_agent
-        agent.is_enabled = False
-        await db_session.commit()
+        user, profile, agent = sample_user_with_profile_and_agent_dict
+        agent["is_enabled"] = False
 
-        service = AdvisorAgentService(db_session)
+        mock_zerodb_client.get_by_id.return_value = agent
+
+        service = AdvisorAgentService()
 
         # When: It tries to make a suggestion
-        allowed, reason = await service.check_permission(agent.id, "suggest")
+        allowed, reason = await service.check_permission(
+            uuid.UUID(agent["id"]), "suggest"
+        )
 
         # Then: The suggestion is blocked
         assert allowed is False
@@ -341,7 +360,7 @@ class TestAgentDisabledBehavior:
 
     @pytest.mark.asyncio
     async def test_scenario_paused_agent_cannot_act(
-        self, db_session: AsyncSession, sample_user_with_profile_and_agent
+        self, mock_zerodb_client, sample_user_with_profile_and_agent_dict
     ):
         """
         Scenario: Paused agent cannot take actions
@@ -350,14 +369,17 @@ class TestAgentDisabledBehavior:
         Then the action is blocked
         """
         # Given: My agent is paused
-        user, profile, agent = sample_user_with_profile_and_agent
-        agent.status = AgentStatus.PAUSED
-        await db_session.commit()
+        user, profile, agent = sample_user_with_profile_and_agent_dict
+        agent["status"] = AgentStatus.PAUSED.value
 
-        service = AdvisorAgentService(db_session)
+        mock_zerodb_client.get_by_id.return_value = agent
+
+        service = AdvisorAgentService()
 
         # When: It tries to take an action
-        allowed, reason = await service.check_permission(agent.id, "act")
+        allowed, reason = await service.check_permission(
+            uuid.UUID(agent["id"]), "act"
+        )
 
         # Then: The action is blocked
         assert allowed is False
@@ -372,50 +394,42 @@ class TestAgentMemoryIsolation:
 
     @pytest.mark.asyncio
     async def test_scenario_agents_have_separate_namespaces(
-        self, db_session: AsyncSession, sample_user_with_profile
+        self, mock_zerodb_client, sample_user_with_profile_and_agent_dict
     ):
         """
         Scenario: Different users have isolated agent memories
         Given two founders with agents
-        When they store memories
-        Then their memories are in separate namespaces
+        When they initialize agents
+        Then their agents have separate namespaces
         """
         # Given: Two founders with agents
-        user1, profile1 = sample_user_with_profile
+        user1, profile1, _ = sample_user_with_profile_and_agent_dict
 
-        # Create second user
-        user2 = User(
-            id=uuid.uuid4(),
-            linkedin_id="linkedin_user2_isolation",
-            name="Second User",
-            headline="Another Founder",
-            email="user2@example.com",
-            is_active=True,
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow()
-        )
-        db_session.add(user2)
-        await db_session.flush()
+        # Create second user dict
+        user2_id = str(uuid.uuid4())
+        user2 = {
+            "id": user2_id,
+            "linkedin_id": "linkedin_user2_isolation",
+            "name": "Second User",
+            "email": "user2@example.com",
+            "is_active": True
+        }
 
-        profile2 = FounderProfile(
-            user_id=user2.id,
-            bio="Second founder bio",
-            autonomy_mode=AutonomyMode.SUGGEST,
-            public_visibility=True,
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow()
-        )
-        db_session.add(profile2)
-        await db_session.commit()
+        service = AdvisorAgentService()
 
-        service = AdvisorAgentService(db_session)
+        # Mock for first user - user exists, no agent
+        mock_zerodb_client.get_by_id.return_value = user1
+        mock_zerodb_client.query_rows.return_value = []
 
-        # Initialize agents for both users
-        agent1 = await service.initialize_agent(user1.id)
-        agent2 = await service.initialize_agent(user2.id)
-        await db_session.commit()
+        agent1 = await service.initialize_agent(uuid.UUID(user1["id"]))
+
+        # Mock for second user
+        mock_zerodb_client.get_by_id.return_value = user2
+        mock_zerodb_client.query_rows.return_value = []
+
+        agent2 = await service.initialize_agent(uuid.UUID(user2_id))
 
         # Then: Their memories are in separate namespaces
-        assert agent1.memory_namespace != agent2.memory_namespace
-        assert str(user1.id) in agent1.memory_namespace
-        assert str(user2.id) in agent2.memory_namespace
+        assert agent1["memory_namespace"] != agent2["memory_namespace"]
+        assert user1["id"] in agent1["memory_namespace"]
+        assert user2_id in agent2["memory_namespace"]
