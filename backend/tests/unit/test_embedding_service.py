@@ -119,18 +119,29 @@ class TestEmbeddingService:
     @pytest.mark.asyncio
     async def test_upsert_embedding_with_retries(self, embedding_service, mock_embedding_vector):
         """Test embedding upsert retries on failure."""
+        import httpx
+
         with patch.object(embedding_service, "generate_embedding", return_value=mock_embedding_vector):
             with patch("httpx.AsyncClient") as mock_client:
-                # First two attempts fail, third succeeds
-                mock_error_response = MagicMock()
-                mock_error_response.raise_for_status.side_effect = Exception("Network error")
+                # Create error responses that raise HTTPError when raise_for_status is called
+                def create_error_response():
+                    mock_resp = MagicMock()
+                    mock_resp.raise_for_status.side_effect = httpx.HTTPError("Network error")
+                    return mock_resp
 
+                mock_error_response_1 = create_error_response()
+                mock_error_response_2 = create_error_response()
+
+                # Success response
                 mock_success_response = MagicMock()
                 mock_success_response.status_code = 200
                 mock_success_response.json.return_value = {"vector_id": "goal_123"}
                 mock_success_response.raise_for_status = MagicMock()
 
-                mock_client.return_value.__aenter__.return_value.post = AsyncMock(side_effect=[mock_error_response, mock_error_response, mock_success_response])
+                # Mock post to return error, error, then success
+                mock_client.return_value.__aenter__.return_value.post = AsyncMock(
+                    side_effect=[mock_error_response_1, mock_error_response_2, mock_success_response]
+                )
 
                 entity_id = uuid4()
                 vector_id = await embedding_service.upsert_embedding(
@@ -271,9 +282,14 @@ class TestEmbeddingService:
     @pytest.mark.asyncio
     async def test_delete_embedding_failure(self, embedding_service):
         """Test embedding deletion handles errors gracefully."""
+        import httpx
+
         with patch("httpx.AsyncClient") as mock_client:
+            # Create error response that raises HTTPError when raise_for_status is called
             mock_response = MagicMock()
-            mock_response.raise_for_status.side_effect = Exception("Not found")
+            mock_response.raise_for_status.side_effect = httpx.HTTPError("Not found")
+
+            # Mock delete to return the error response
             mock_client.return_value.__aenter__.return_value.delete = AsyncMock(return_value=mock_response)
 
             result = await embedding_service.delete_embedding("nonexistent")
@@ -325,7 +341,9 @@ class TestEmbeddingService:
                 mock_response.status_code = 200
                 mock_response.json.return_value = {"results": []}
                 mock_response.raise_for_status = MagicMock()
-                mock_client.return_value.__aenter__.return_value.post = AsyncMock(return_value=mock_response)
+
+                mock_post = AsyncMock(return_value=mock_response)
+                mock_client.return_value.__aenter__.return_value.post = mock_post
 
                 await embedding_service.search_similar(
                     query_text="Test query",
