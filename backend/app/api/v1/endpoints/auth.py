@@ -48,8 +48,7 @@ async def initiate_linkedin_oauth():
 
 @router.get("/linkedin/callback")
 async def linkedin_oauth_callback(
-    code: str = Query(..., description="Authorization code from LinkedIn"),
-    db: AsyncSession = Depends(get_db)
+    code: str = Query(..., description="Authorization code from LinkedIn")
 ):
     """
     LinkedIn OAuth callback handler
@@ -116,15 +115,15 @@ async def linkedin_oauth_callback(
                 email=linkedin_user.get("email")
             )
 
-            # Create or get existing user
-            auth_service = AuthService(db)
+            # Create or get existing user (no DB session needed with ZeroDB)
+            auth_service = AuthService()
             user, profile, created = await auth_service.get_or_create_user_from_linkedin(linkedin_data)
 
             # Create JWT token
             token_payload = {
-                "sub": str(user.id),
-                "linkedin_id": user.linkedin_id,
-                "email": user.email
+                "sub": user["id"],
+                "linkedin_id": user["linkedin_id"],
+                "email": user["email"]
             }
 
             jwt_token = create_access_token(
@@ -136,7 +135,7 @@ async def linkedin_oauth_callback(
                 "access_token": jwt_token,
                 "token_type": "bearer",
                 "expires_in": settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60,  # seconds
-                "user": UserResponse.from_orm(user),
+                "user": user,  # Already a dict from ZeroDB
                 "created": created
             }
 
