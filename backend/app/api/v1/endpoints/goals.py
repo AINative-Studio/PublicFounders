@@ -5,21 +5,23 @@ Implements CRUD operations for founder goals with semantic embedding support.
 Endpoints:
 - POST   /api/v1/goals - Create goal
 - GET    /api/v1/goals - List my goals
+- GET    /api/v1/goals/search - Search goals semantically
 - GET    /api/v1/goals/{goal_id} - Get goal
 - PUT    /api/v1/goals/{goal_id} - Update goal
 - DELETE /api/v1/goals/{goal_id} - Delete goal
 """
 import logging
+import time
+from datetime import datetime
 from typing import List, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
-from app.core.database import get_db
-from app.models.user import User
-from app.models.goal import Goal, GoalType
+from app.services.zerodb_client import zerodb_client
+from app.models.goal import GoalType
 from app.schemas.goal import GoalCreate, GoalUpdate, GoalResponse, GoalListResponse
 from app.services.embedding_service import embedding_service, EmbeddingServiceError
+from app.services.rlhf_service import rlhf_service, RLHFServiceError
+from app.services.observability_service import observability_service
 
 logger = logging.getLogger(__name__)
 
@@ -27,17 +29,19 @@ router = APIRouter(prefix="/goals", tags=["goals"])
 
 
 # TODO: Replace with actual auth dependency from Sprint 1
-async def get_current_user(db: AsyncSession = Depends(get_db)) -> User:
+async def get_current_user() -> dict:
     """Mock auth dependency - replace with Sprint 1 implementation."""
-    # For now, return first user in database
-    result = await db.execute(select(User).limit(1))
-    user = result.scalar_one_or_none()
-    if not user:
+    # For now, return first user from ZeroDB
+    users = await zerodb_client.query_rows(
+        table_name="users",
+        limit=1
+    )
+    if not users:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required"
         )
-    return user
+    return users[0]
 
 
 @router.post(
@@ -49,8 +53,7 @@ async def get_current_user(db: AsyncSession = Depends(get_db)) -> User:
 )
 async def create_goal(
     goal_data: GoalCreate,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ) -> GoalResponse:
     """
     Create a new goal for the authenticated user.
@@ -60,38 +63,60 @@ async def create_goal(
     - Creates semantic embedding (SYNC - critical for matching)
     - Returns created goal
     """
-    # Create goal in database
-    goal = Goal(
-        user_id=current_user.id,
-        type=goal_data.type,
-        description=goal_data.description,
-        priority=goal_data.priority,
-        is_active=goal_data.is_active
+    # Generate goal ID
+    goal_id = str(uuid4())
+    now = datetime.utcnow().isoformat()
+
+    # Prepare goal data
+    goal_dict = {
+        "id": goal_id,
+        "user_id": current_user["id"],
+        "type": goal_data.type.value,
+        "description": goal_data.description,
+        "priority": goal_data.priority,
+        "is_active": goal_data.is_active,
+        "embedding_id": None,
+        "created_at": now,
+        "updated_at": now
+    }
+
+    # Insert goal into ZeroDB
+    await zerodb_client.insert_rows(
+        table_name="goals",
+        rows=[goal_dict]
     )
 
-    db.add(goal)
-    await db.commit()
-    await db.refresh(goal)
-
     # Create embedding synchronously (critical for matching)
+    embedding_id = None
     try:
-        await embedding_service.create_goal_embedding(
-            goal_id=goal.id,
-            user_id=current_user.id,
-            goal_type=goal.type.value,
-            description=goal.description,
-            priority=goal.priority,
+        embedding_id = await embedding_service.create_goal_embedding(
+            goal_id=UUID(goal_id),
+            user_id=UUID(current_user["id"]),
+            goal_type=goal_data.type.value,
+            description=goal_data.description,
+            priority=goal_data.priority,
             additional_metadata={
-                "is_active": goal.is_active
+                "is_active": goal_data.is_active
             }
         )
-        logger.info(f"Created goal embedding for goal {goal.id}")
+        logger.info(f"Created goal embedding for goal {goal_id}")
+
+        # Update goal with embedding_id
+        await zerodb_client.update_rows(
+            table_name="goals",
+            filter={"id": goal_id},
+            update={"$set": {
+                "embedding_id": embedding_id,
+                "updated_at": datetime.utcnow().isoformat()
+            }}
+        )
+        goal_dict["embedding_id"] = embedding_id
     except EmbeddingServiceError as e:
         logger.error(f"Failed to create goal embedding: {e}")
-        # Don't rollback - goal creation should succeed even if embedding fails
+        # Don't fail - goal creation should succeed even if embedding fails
         # Embedding can be retried later via background job
 
-    return GoalResponse.model_validate(goal)
+    return GoalResponse(**goal_dict)
 
 
 @router.get(
@@ -105,8 +130,7 @@ async def list_goals(
     page_size: int = Query(20, ge=1, le=100, description="Items per page"),
     is_active: Optional[bool] = Query(None, description="Filter by active status"),
     goal_type: Optional[GoalType] = Query(None, description="Filter by goal type"),
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ) -> GoalListResponse:
     """
     List goals for the authenticated user with pagination and filtering.
@@ -116,33 +140,41 @@ async def list_goals(
     - Filter by goal type
     - Orders by priority (desc) then created_at (desc)
     """
-    # Build query
-    query = select(Goal).where(Goal.user_id == current_user.id)
+    # Build filter
+    filter_dict = {"user_id": current_user["id"]}
 
     # Apply filters
     if is_active is not None:
-        query = query.where(Goal.is_active == is_active)
+        filter_dict["is_active"] = is_active
 
     if goal_type is not None:
-        query = query.where(Goal.type == goal_type)
+        filter_dict["type"] = goal_type.value
 
-    # Get total count
-    count_query = select(func.count()).select_from(query.subquery())
-    total_result = await db.execute(count_query)
-    total = total_result.scalar()
+    # Get all matching goals for total count
+    # Note: ZeroDB doesn't support count operation, so we query all and count
+    all_goals = await zerodb_client.query_rows(
+        table_name="goals",
+        filter=filter_dict,
+        limit=1000  # Reasonable upper limit
+    )
+    total = len(all_goals)
 
-    # Apply ordering and pagination
-    query = query.order_by(
-        Goal.priority.desc(),
-        Goal.created_at.desc()
-    ).offset((page - 1) * page_size).limit(page_size)
+    # Sort by priority (desc) then created_at (desc)
+    all_goals.sort(
+        key=lambda g: (
+            -g.get("priority", 0),
+            g.get("created_at", "")
+        ),
+        reverse=True
+    )
 
-    # Execute query
-    result = await db.execute(query)
-    goals = result.scalars().all()
+    # Apply pagination
+    start_idx = (page - 1) * page_size
+    end_idx = start_idx + page_size
+    goals = all_goals[start_idx:end_idx]
 
     return GoalListResponse(
-        goals=[GoalResponse.model_validate(goal) for goal in goals],
+        goals=[GoalResponse(**goal) for goal in goals],
         total=total,
         page=page,
         page_size=page_size,
@@ -158,8 +190,7 @@ async def list_goals(
 )
 async def get_goal(
     goal_id: UUID,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ) -> GoalResponse:
     """
     Get a specific goal by ID.
@@ -167,21 +198,23 @@ async def get_goal(
     - Verifies goal belongs to authenticated user
     - Returns 404 if not found or doesn't belong to user
     """
-    result = await db.execute(
-        select(Goal).where(
-            Goal.id == goal_id,
-            Goal.user_id == current_user.id
-        )
+    # Query goal from ZeroDB
+    goals = await zerodb_client.query_rows(
+        table_name="goals",
+        filter={
+            "id": str(goal_id),
+            "user_id": current_user["id"]
+        },
+        limit=1
     )
-    goal = result.scalar_one_or_none()
 
-    if not goal:
+    if not goals:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Goal {goal_id} not found"
         )
 
-    return GoalResponse.model_validate(goal)
+    return GoalResponse(**goals[0])
 
 
 @router.put(
@@ -193,8 +226,7 @@ async def get_goal(
 async def update_goal(
     goal_id: UUID,
     goal_update: GoalUpdate,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ) -> GoalResponse:
     """
     Update an existing goal.
@@ -205,51 +237,81 @@ async def update_goal(
     - Returns updated goal
     """
     # Fetch goal
-    result = await db.execute(
-        select(Goal).where(
-            Goal.id == goal_id,
-            Goal.user_id == current_user.id
-        )
+    goals = await zerodb_client.query_rows(
+        table_name="goals",
+        filter={
+            "id": str(goal_id),
+            "user_id": current_user["id"]
+        },
+        limit=1
     )
-    goal = result.scalar_one_or_none()
 
-    if not goal:
+    if not goals:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Goal {goal_id} not found"
         )
 
+    goal = goals[0]
+
     # Track if embedding needs update
     needs_embedding_update = False
 
-    # Update fields
+    # Prepare update fields
     update_data = goal_update.model_dump(exclude_unset=True)
+    update_dict = {}
+
     for field, value in update_data.items():
         if field in ["type", "description"]:
             needs_embedding_update = True
-        setattr(goal, field, value)
+        # Convert enum to value if needed
+        if hasattr(value, 'value'):
+            update_dict[field] = value.value
+        else:
+            update_dict[field] = value
 
-    await db.commit()
-    await db.refresh(goal)
+    # Add updated_at timestamp
+    update_dict["updated_at"] = datetime.utcnow().isoformat()
+
+    # Update goal in ZeroDB
+    await zerodb_client.update_rows(
+        table_name="goals",
+        filter={"id": str(goal_id)},
+        update={"$set": update_dict}
+    )
+
+    # Merge updates into goal dict
+    goal.update(update_dict)
 
     # Update embedding if needed
     if needs_embedding_update:
         try:
-            await embedding_service.create_goal_embedding(
-                goal_id=goal.id,
-                user_id=current_user.id,
-                goal_type=goal.type.value,
-                description=goal.description,
-                priority=goal.priority,
+            embedding_id = await embedding_service.create_goal_embedding(
+                goal_id=goal_id,
+                user_id=UUID(current_user["id"]),
+                goal_type=goal.get("type"),
+                description=goal.get("description"),
+                priority=goal.get("priority", 0),
                 additional_metadata={
-                    "is_active": goal.is_active
+                    "is_active": goal.get("is_active", True)
                 }
             )
-            logger.info(f"Updated goal embedding for goal {goal.id}")
+            logger.info(f"Updated goal embedding for goal {goal_id}")
+
+            # Update embedding_id in ZeroDB
+            await zerodb_client.update_rows(
+                table_name="goals",
+                filter={"id": str(goal_id)},
+                update={"$set": {
+                    "embedding_id": embedding_id,
+                    "updated_at": datetime.utcnow().isoformat()
+                }}
+            )
+            goal["embedding_id"] = embedding_id
         except EmbeddingServiceError as e:
             logger.error(f"Failed to update goal embedding: {e}")
 
-    return GoalResponse.model_validate(goal)
+    return GoalResponse(**goal)
 
 
 @router.delete(
@@ -260,8 +322,7 @@ async def update_goal(
 )
 async def delete_goal(
     goal_id: UUID,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ) -> None:
     """
     Delete a goal.
@@ -272,23 +333,26 @@ async def delete_goal(
     - Returns 204 on success
     """
     # Fetch goal
-    result = await db.execute(
-        select(Goal).where(
-            Goal.id == goal_id,
-            Goal.user_id == current_user.id
-        )
+    goals = await zerodb_client.query_rows(
+        table_name="goals",
+        filter={
+            "id": str(goal_id),
+            "user_id": current_user["id"]
+        },
+        limit=1
     )
-    goal = result.scalar_one_or_none()
 
-    if not goal:
+    if not goals:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Goal {goal_id} not found"
         )
 
-    # Delete from database
-    await db.delete(goal)
-    await db.commit()
+    # Delete from ZeroDB
+    await zerodb_client.delete_rows(
+        table_name="goals",
+        filter={"id": str(goal_id)}
+    )
 
     # Attempt to delete embedding (don't fail if this errors)
     try:
@@ -299,3 +363,127 @@ async def delete_goal(
         logger.error(f"Failed to delete goal embedding: {e}")
 
     return None
+
+
+@router.get(
+    "/search",
+    response_model=GoalListResponse,
+    summary="Search for matching goals",
+    description="Semantic search for goals that match your description"
+)
+async def search_goals(
+    query: str = Query(..., description="Search query for finding similar goals"),
+    goal_type: Optional[GoalType] = Query(None, description="Filter by goal type"),
+    limit: int = Query(20, ge=1, le=100, description="Maximum results"),
+    min_similarity: float = Query(0.7, ge=0.0, le=1.0, description="Minimum similarity threshold"),
+    current_user: dict = Depends(get_current_user)
+) -> GoalListResponse:
+    """
+    Search for goals semantically similar to the query.
+
+    - Performs semantic search using embeddings
+    - Filters by goal type if specified
+    - Returns results with similarity scores
+    - Tracks interaction for RLHF learning
+    """
+    try:
+        # Build metadata filters
+        metadata_filters = {}
+        if goal_type:
+            metadata_filters["goal_type"] = goal_type.value
+
+        # Perform semantic search
+        start_time = time.time()
+        results = await embedding_service.search_similar(
+            query_text=query,
+            entity_type="goal",
+            metadata_filters=metadata_filters if metadata_filters else None,
+            limit=limit,
+            min_similarity=min_similarity
+        )
+        search_duration_ms = (time.time() - start_time) * 1000
+
+        # Track embedding search cost
+        await observability_service.track_embedding_cost(
+            operation="search",
+            tokens=len(query.split()) * 5,  # Rough estimate
+            entity_type="goal"
+        )
+
+        # Extract goal IDs and scores
+        goal_ids = []
+        similarity_scores = []
+
+        for result in results:
+            metadata = result.get("metadata", {})
+            source_id = metadata.get("source_id")
+            if source_id:
+                try:
+                    goal_ids.append(source_id)
+                    similarity_scores.append(result.get("similarity", 0.0))
+                except ValueError:
+                    logger.warning(f"Invalid UUID in source_id: {source_id}")
+                    continue
+
+        # Fetch goals from ZeroDB
+        goals_list = []
+        if goal_ids:
+            # Query goals in batches (ZeroDB limitation)
+            for goal_id in goal_ids:
+                goal = await zerodb_client.get_by_id(
+                    table_name="goals",
+                    id=goal_id
+                )
+                if goal:
+                    goals_list.append(goal)
+
+        # Track RLHF interaction for learning
+        try:
+            await rlhf_service.track_goal_match(
+                query_goal_id=uuid4(),  # Synthetic ID for search query
+                query_goal_description=query,
+                matched_goal_ids=[UUID(gid) for gid in goal_ids],
+                similarity_scores=similarity_scores,
+                context={
+                    "user_id": current_user["id"],
+                    "goal_type": goal_type.value if goal_type else None,
+                    "search_duration_ms": search_duration_ms,
+                    "min_similarity": min_similarity
+                }
+            )
+        except RLHFServiceError as e:
+            # Don't fail the request if RLHF tracking fails
+            logger.warning(f"Failed to track RLHF interaction: {e}")
+
+        # Track API performance
+        await observability_service.track_api_call(
+            endpoint="/goals/search",
+            method="GET",
+            duration_ms=search_duration_ms,
+            status_code=200,
+            user_id=current_user["id"]
+        )
+
+        return GoalListResponse(
+            goals=[GoalResponse(**goal) for goal in goals_list],
+            total=len(goals_list),
+            page=1,
+            page_size=len(goals_list),
+            has_more=False
+        )
+
+    except EmbeddingServiceError as e:
+        logger.error(f"Semantic search failed: {e}")
+
+        # Track error
+        await observability_service.track_error(
+            error_type="embedding_search_error",
+            error_message=str(e),
+            severity="high",
+            context={"query": query, "user_id": current_user["id"]}
+        )
+
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Semantic search temporarily unavailable"
+        )
