@@ -2,6 +2,7 @@
 Profile API Endpoints
 Founder profile CRUD operations
 """
+import logging
 import uuid
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Query
@@ -11,12 +12,15 @@ from app.core.database import get_db
 from app.core.security import decode_access_token
 from app.services.profile_service import ProfileService
 from app.services.auth_service import AuthService
+from app.services.safety_service import safety_service
 from app.schemas.founder_profile import (
     FounderProfileResponse,
     FounderProfileUpdate
 )
 from app.schemas.user import UserResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 security = HTTPBearer()
@@ -108,8 +112,61 @@ async def update_my_profile(
     Update current user's profile
 
     Triggers embedding regeneration if bio or focus changes
+    Scans bio and current_focus for PII and inappropriate content
     """
     profile_service = ProfileService(db)
+
+    # Scan bio for safety issues if provided
+    if update_data.bio:
+        try:
+            safety_check = await safety_service.scan_text(
+                text=update_data.bio,
+                checks=["pii", "content_moderation"]
+            )
+
+            # Log PII warnings (don't block, just warn)
+            if safety_check.contains_pii:
+                logger.warning(
+                    f"Profile update for user {current_user_id} contains PII: {safety_check.pii_types}"
+                )
+                # You could add a warning message to response in production
+
+            # Block inappropriate content
+            if not safety_check.is_safe:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Profile bio contains inappropriate content: {', '.join(safety_check.content_flags)}"
+                )
+
+        except HTTPException:
+            raise  # Re-raise HTTP exceptions
+        except Exception as e:
+            # Log safety check errors but don't block profile updates
+            logger.error(f"Safety check failed for profile update: {e}")
+
+    # Scan current_focus for safety issues if provided
+    if update_data.current_focus:
+        try:
+            safety_check = await safety_service.scan_text(
+                text=update_data.current_focus,
+                checks=["pii", "content_moderation"]
+            )
+
+            if safety_check.contains_pii:
+                logger.warning(
+                    f"Profile current_focus for user {current_user_id} contains PII: {safety_check.pii_types}"
+                )
+
+            if not safety_check.is_safe:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Current focus contains inappropriate content: {', '.join(safety_check.content_flags)}"
+                )
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Safety check failed for current_focus: {e}")
 
     try:
         updated_profile = await profile_service.update_profile(

@@ -5,14 +5,16 @@ Implements CRUD operations for build-in-public posts with async embedding and se
 Endpoints:
 - POST   /api/v1/posts - Create post
 - GET    /api/v1/posts - List posts (chronological feed)
+- GET    /api/v1/posts/discover - Semantic discovery feed
+- POST   /api/v1/posts/{post_id}/view - Track post view
 - GET    /api/v1/posts/{post_id} - Get post
 - PUT    /api/v1/posts/{post_id} - Update post
 - DELETE /api/v1/posts/{post_id} - Delete post
-- GET    /api/v1/posts/discover - Semantic discovery feed
 """
 import asyncio
 import logging
-from typing import Optional
+import time
+from typing import Optional, List
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,6 +32,10 @@ from app.schemas.post import (
     PostDiscoveryResponse
 )
 from app.services.embedding_service import embedding_service, EmbeddingServiceError
+from app.services.cache_service import cache_service
+from app.services.safety_service import safety_service
+from app.services.rlhf_service import rlhf_service, RLHFServiceError
+from app.services.observability_service import observability_service
 
 logger = logging.getLogger(__name__)
 
@@ -133,10 +139,41 @@ async def create_post(
     Create a new build-in-public post.
 
     - Validates post data
+    - Scans for inappropriate content and PII
     - Persists to database immediately
     - Queues embedding creation as background task (ASYNC - don't block UX)
     - Returns created post with embedding_status='pending'
     """
+    # Scan post content for safety issues
+    try:
+        safety_check = await safety_service.scan_text(
+            text=post_data.content,
+            checks=["content_moderation", "pii"]
+        )
+
+        # Block inappropriate content
+        if not safety_check.is_safe:
+            logger.warning(
+                f"Post creation blocked for user {current_user.id}: "
+                f"flags {safety_check.content_flags}"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Post contains inappropriate content: {', '.join(safety_check.content_flags)}"
+            )
+
+        # Warn about PII (log but don't block)
+        if safety_check.contains_pii:
+            logger.warning(
+                f"Post for user {current_user.id} contains PII: {safety_check.pii_types}"
+            )
+
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions
+    except Exception as e:
+        # Log safety errors but don't block post creation
+        logger.error(f"Safety check failed for post creation: {e}")
+
     # Create post in database
     post = Post(
         user_id=current_user.id,
@@ -161,7 +198,12 @@ async def create_post(
         db_url=settings.DATABASE_URL
     )
 
-    logger.info(f"Created post {post.id}, embedding queued")
+    # Invalidate discovery cache since new content affects all discovery results
+    background_tasks.add_task(
+        cache_service.invalidate_all_cache
+    )
+
+    logger.info(f"Created post {post.id}, embedding queued, cache invalidation scheduled")
 
     return PostResponse.model_validate(post)
 
@@ -224,7 +266,7 @@ async def list_posts(
     "/discover",
     response_model=PostDiscoveryResponse,
     summary="Discover relevant posts (semantic)",
-    description="Discover posts relevant to your goals using semantic search"
+    description="Discover posts relevant to your goals using semantic search with caching"
 )
 async def discover_posts(
     discovery_params: PostDiscoveryRequest = Depends(),
@@ -235,7 +277,9 @@ async def discover_posts(
     Discover posts semantically relevant to user's goals.
 
     - Combines user's active goals as query
-    - Semantic search with recency weighting
+    - Checks cache first for performance (< 200ms for cache hits)
+    - Semantic search with recency weighting if cache miss
+    - Caches results with 5-minute TTL
     - Returns ranked posts with similarity scores
     """
     # Get user's active goals
@@ -258,13 +302,31 @@ async def discover_posts(
     # Extract goal descriptions
     goal_descriptions = [goal.description for goal in goals]
 
+    # CACHE LOOKUP: Check if we have cached results
+    cached_results = await cache_service.get_cached_discovery(
+        user_id=current_user.id,
+        goal_descriptions=goal_descriptions
+    )
+
+    if cached_results:
+        logger.info(f"Cache HIT for user {current_user.id} discovery")
+        # Return cached results directly
+        return PostDiscoveryResponse(**cached_results)
+
+    logger.info(f"Cache MISS for user {current_user.id} discovery - performing semantic search")
+
     try:
+        # Track discovery start time for observability
+        start_time = time.time()
+
         # Perform semantic discovery
         scored_results = await embedding_service.discover_relevant_posts(
             user_goals=goal_descriptions,
             limit=discovery_params.limit,
             recency_weight=discovery_params.recency_weight
         )
+
+        discovery_duration_ms = (time.time() - start_time) * 1000
 
         # Extract post IDs from results
         post_ids = []
@@ -295,24 +357,119 @@ async def discover_posts(
             # Reorder posts to match similarity order
             ordered_posts = [post_map[post_id] for post_id in post_ids if post_id in post_map]
 
-            return PostDiscoveryResponse(
+            response_data = PostDiscoveryResponse(
                 posts=[PostResponse.model_validate(post) for post in ordered_posts],
                 similarity_scores=similarity_scores[:len(ordered_posts)],
                 total=len(ordered_posts)
             )
         else:
-            return PostDiscoveryResponse(
+            response_data = PostDiscoveryResponse(
                 posts=[],
                 similarity_scores=[],
                 total=0
             )
 
+        # CACHE STORAGE: Store results for future requests
+        await cache_service.cache_discovery_results(
+            user_id=current_user.id,
+            goal_descriptions=goal_descriptions,
+            results=response_data.model_dump(),
+            ttl_seconds=300  # 5 minutes
+        )
+
+        # Track RLHF interaction for discovery learning (no clicks yet)
+        try:
+            await rlhf_service.track_discovery_interaction(
+                user_id=current_user.id,
+                user_goals=goal_descriptions,
+                shown_posts=post_ids,
+                clicked_post_id=None  # Will be tracked separately on click
+            )
+        except RLHFServiceError as e:
+            logger.warning(f"Failed to track RLHF discovery interaction: {e}")
+
+        # Track API performance
+        await observability_service.track_api_call(
+            endpoint="/posts/discover",
+            method="GET",
+            duration_ms=discovery_duration_ms,
+            status_code=200,
+            user_id=str(current_user.id)
+        )
+
+        return response_data
+
     except EmbeddingServiceError as e:
         logger.error(f"Semantic discovery failed: {e}")
+
+        # Track error
+        await observability_service.track_error(
+            error_type="discovery_error",
+            error_message=str(e),
+            severity="high",
+            context={"user_id": str(current_user.id), "goal_count": len(goal_descriptions)}
+        )
+
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Semantic search temporarily unavailable"
         )
+
+
+@router.post(
+    "/{post_id}/view",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Track post view",
+    description="Track when user views/clicks a discovered post for RLHF learning"
+)
+async def track_post_view(
+    post_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+) -> None:
+    """
+    Track when user views/clicks a discovered post.
+
+    - Updates RLHF with positive feedback for discovery algorithm
+    - Helps improve future discovery recommendations
+    - Returns 204 No Content on success
+    """
+    # Verify post exists
+    result = await db.execute(
+        select(Post).where(Post.id == post_id)
+    )
+    post = result.scalar_one_or_none()
+
+    if not post:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Post {post_id} not found"
+        )
+
+    # Get user's active goals for context
+    goals_result = await db.execute(
+        select(Goal).where(
+            Goal.user_id == current_user.id,
+            Goal.is_active == True
+        )
+    )
+    goals = goals_result.scalars().all()
+    goal_descriptions = [goal.description for goal in goals]
+
+    # Track discovery interaction with click feedback
+    try:
+        await rlhf_service.track_discovery_interaction(
+            user_id=current_user.id,
+            user_goals=goal_descriptions,
+            shown_posts=[post_id],
+            clicked_post_id=post_id
+        )
+        logger.info(f"Tracked post view: user={current_user.id}, post={post_id}")
+    except RLHFServiceError as e:
+        # Don't fail the request if RLHF tracking fails
+        logger.warning(f"Failed to track post view: {e}")
+
+    return None
 
 
 @router.get(
@@ -363,10 +520,42 @@ async def update_post(
     Update an existing post.
 
     - Verifies post belongs to authenticated user
+    - Scans for inappropriate content and PII if content updated
     - Updates only provided fields
     - Queues embedding regeneration if content or type changed (async)
     - Returns updated post
     """
+    # Scan content for safety issues if being updated
+    update_data = post_update.model_dump(exclude_unset=True)
+    if "content" in update_data:
+        try:
+            safety_check = await safety_service.scan_text(
+                text=update_data["content"],
+                checks=["content_moderation", "pii"]
+            )
+
+            # Block inappropriate content
+            if not safety_check.is_safe:
+                logger.warning(
+                    f"Post update blocked for user {current_user.id}: "
+                    f"flags {safety_check.content_flags}"
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Post contains inappropriate content: {', '.join(safety_check.content_flags)}"
+                )
+
+            # Warn about PII
+            if safety_check.contains_pii:
+                logger.warning(
+                    f"Post update for user {current_user.id} contains PII: {safety_check.pii_types}"
+                )
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Safety check failed for post update: {e}")
+
     # Fetch post
     result = await db.execute(
         select(Post).where(

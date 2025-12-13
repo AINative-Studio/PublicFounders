@@ -5,14 +5,16 @@ Implements CRUD operations for founder asks with semantic embedding support.
 Endpoints:
 - POST   /api/v1/asks - Create ask
 - GET    /api/v1/asks - List asks (mine or all)
+- GET    /api/v1/asks/search - Search asks semantically
 - GET    /api/v1/asks/{ask_id} - Get ask
 - PUT    /api/v1/asks/{ask_id} - Update ask
 - PATCH  /api/v1/asks/{ask_id}/status - Update status
 - DELETE /api/v1/asks/{ask_id} - Delete ask
 """
 import logging
-from typing import Optional
-from uuid import UUID
+import time
+from typing import Optional, List
+from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_
@@ -28,6 +30,9 @@ from app.schemas.ask import (
     AskListResponse
 )
 from app.services.embedding_service import embedding_service, EmbeddingServiceError
+from app.services.safety_service import safety_service
+from app.services.rlhf_service import rlhf_service, RLHFServiceError
+from app.services.observability_service import observability_service
 
 logger = logging.getLogger(__name__)
 
@@ -63,11 +68,43 @@ async def create_ask(
     Create a new ask for the authenticated user.
 
     - Validates ask data
+    - Scans for PII and scam content
     - Verifies goal ownership if goal_id provided
     - Persists to database
     - Creates semantic embedding (SYNC - critical for agent matching)
     - Returns created ask
     """
+    # Scan ask description for safety issues
+    try:
+        safety_check = await safety_service.scan_text(
+            text=ask_data.description,
+            checks=["pii", "scam_detection"]
+        )
+
+        # Block high-confidence scams immediately
+        if safety_check.is_scam and safety_check.scam_confidence > 0.7:
+            logger.warning(
+                f"Ask creation blocked for user {current_user.id}: "
+                f"scam confidence {safety_check.scam_confidence}"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Ask contains suspicious content. Please revise and resubmit."
+            )
+
+        # Warn about PII (log but don't block)
+        if safety_check.contains_pii:
+            logger.warning(
+                f"Ask for user {current_user.id} contains PII: {safety_check.pii_types}"
+            )
+            # In production, you could return a warning in the response
+
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions
+    except Exception as e:
+        # Log safety errors but don't block ask creation
+        logger.error(f"Safety check failed for ask creation: {e}")
+
     # Validate goal ownership if goal_id provided
     if ask_data.goal_id:
         goal_result = await db.execute(
@@ -226,10 +263,42 @@ async def update_ask(
     Update an existing ask.
 
     - Verifies ask belongs to authenticated user
+    - Scans for PII and scam content if description updated
     - Updates only provided fields
     - Regenerates embedding if description or urgency changed
     - Returns updated ask
     """
+    # Scan description for safety issues if being updated
+    update_data = ask_update.model_dump(exclude_unset=True)
+    if "description" in update_data:
+        try:
+            safety_check = await safety_service.scan_text(
+                text=update_data["description"],
+                checks=["pii", "scam_detection"]
+            )
+
+            # Block high-confidence scams
+            if safety_check.is_scam and safety_check.scam_confidence > 0.7:
+                logger.warning(
+                    f"Ask update blocked for user {current_user.id}: "
+                    f"scam confidence {safety_check.scam_confidence}"
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Ask contains suspicious content. Please revise and resubmit."
+                )
+
+            # Warn about PII
+            if safety_check.contains_pii:
+                logger.warning(
+                    f"Ask update for user {current_user.id} contains PII: {safety_check.pii_types}"
+                )
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Safety check failed for ask update: {e}")
+
     # Fetch ask
     result = await db.execute(
         select(Ask).where(
@@ -388,3 +457,128 @@ async def delete_ask(
         logger.error(f"Failed to delete ask embedding: {e}")
 
     return None
+
+
+@router.get(
+    "/search",
+    response_model=AskListResponse,
+    summary="Search for matching asks",
+    description="Semantic search for asks that match your query"
+)
+async def search_asks(
+    query: str = Query(..., description="Search query for finding similar asks"),
+    urgency_filter: Optional[AskUrgency] = Query(None, description="Filter by urgency"),
+    limit: int = Query(20, ge=1, le=100, description="Maximum results"),
+    min_similarity: float = Query(0.7, ge=0.0, le=1.0, description="Minimum similarity threshold"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+) -> AskListResponse:
+    """
+    Search for asks semantically similar to the query.
+
+    - Performs semantic search using embeddings
+    - Filters by urgency if specified
+    - Returns results with similarity scores
+    - Tracks interaction for RLHF learning
+    """
+    try:
+        # Build metadata filters
+        metadata_filters = {}
+        if urgency_filter:
+            metadata_filters["urgency"] = urgency_filter.value
+
+        # Perform semantic search
+        start_time = time.time()
+        results = await embedding_service.search_similar(
+            query_text=query,
+            entity_type="ask",
+            metadata_filters=metadata_filters if metadata_filters else None,
+            limit=limit,
+            min_similarity=min_similarity
+        )
+        search_duration_ms = (time.time() - start_time) * 1000
+
+        # Track embedding search cost
+        await observability_service.track_embedding_cost(
+            operation="search",
+            tokens=len(query.split()) * 5,  # Rough estimate
+            entity_type="ask"
+        )
+
+        # Extract ask IDs and scores
+        ask_ids = []
+        similarity_scores = []
+
+        for result in results:
+            metadata = result.get("metadata", {})
+            source_id = metadata.get("source_id")
+            if source_id:
+                try:
+                    ask_ids.append(UUID(source_id))
+                    similarity_scores.append(result.get("similarity", 0.0))
+                except ValueError:
+                    logger.warning(f"Invalid UUID in source_id: {source_id}")
+                    continue
+
+        # Fetch asks from database
+        asks_list = []
+        if ask_ids:
+            asks_result = await db.execute(
+                select(Ask).where(Ask.id.in_(ask_ids))
+            )
+            asks = asks_result.scalars().all()
+
+            # Create a mapping for ordering by similarity
+            ask_map = {ask.id: ask for ask in asks}
+            asks_list = [ask_map[ask_id] for ask_id in ask_ids if ask_id in ask_map]
+
+        # Track RLHF interaction for learning
+        try:
+            await rlhf_service.track_ask_match(
+                query_ask_id=uuid4(),  # Synthetic ID for search query
+                query_ask_description=query,
+                matched_ask_ids=ask_ids,
+                similarity_scores=similarity_scores,
+                context={
+                    "user_id": str(current_user.id),
+                    "urgency": urgency_filter.value if urgency_filter else None,
+                    "search_duration_ms": search_duration_ms,
+                    "min_similarity": min_similarity
+                }
+            )
+        except RLHFServiceError as e:
+            # Don't fail the request if RLHF tracking fails
+            logger.warning(f"Failed to track RLHF interaction: {e}")
+
+        # Track API performance
+        await observability_service.track_api_call(
+            endpoint="/asks/search",
+            method="GET",
+            duration_ms=search_duration_ms,
+            status_code=200,
+            user_id=str(current_user.id)
+        )
+
+        return AskListResponse(
+            asks=[AskResponse.model_validate(ask) for ask in asks_list],
+            total=len(asks_list),
+            page=1,
+            page_size=len(asks_list),
+            has_more=False
+        )
+
+    except EmbeddingServiceError as e:
+        logger.error(f"Semantic search failed: {e}")
+
+        # Track error
+        await observability_service.track_error(
+            error_type="embedding_search_error",
+            error_message=str(e),
+            severity="high",
+            context={"query": query, "user_id": str(current_user.id)}
+        )
+
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Semantic search temporarily unavailable"
+        )
