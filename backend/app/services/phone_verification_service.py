@@ -1,14 +1,12 @@
 """
-Phone Verification Service
-Handles phone number verification with SMS codes
+Phone Verification Service - ZeroDB Edition
+Handles phone number verification with SMS codes using ZeroDB NoSQL
 """
 import uuid
 import re
 from datetime import datetime, timedelta
 from typing import Optional
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.models.user import User
+from app.services.zerodb_client import zerodb_client
 from app.core.config import settings
 from app.core.security import generate_verification_code
 
@@ -16,8 +14,9 @@ from app.core.security import generate_verification_code
 class PhoneVerificationService:
     """Service for phone number verification"""
 
-    def __init__(self, db: AsyncSession):
-        self.db = db
+    def __init__(self):
+        """Initialize phone verification service (no DB session needed)"""
+        pass
 
     def _validate_phone_format(self, phone_number: str) -> str:
         """
@@ -85,7 +84,10 @@ class PhoneVerificationService:
         cleaned_phone = self._validate_phone_format(phone_number)
 
         # Get user
-        user = await self.db.get(User, user_id)
+        user = await zerodb_client.get_by_id(
+            table_name="users",
+            id=str(user_id)
+        )
         if not user:
             raise ValueError("User not found")
 
@@ -100,13 +102,17 @@ class PhoneVerificationService:
         )
 
         # Update user with verification code
-        user.phone_number = cleaned_phone
-        user.phone_verification_code = code
-        user.phone_verification_expires_at = expires_at
-        user.phone_verified = False  # Reset verification status
-        user.updated_at = datetime.utcnow()
-
-        await self.db.commit()
+        await zerodb_client.update_rows(
+            table_name="users",
+            filter={"id": str(user_id)},
+            update={"$set": {
+                "phone_number": cleaned_phone,
+                "phone_verification_code": code,
+                "phone_verification_expires_at": expires_at.isoformat(),
+                "phone_verified": False,
+                "updated_at": datetime.utcnow().isoformat()
+            }}
+        )
 
         # Send SMS
         await self._send_sms(cleaned_phone, code)
@@ -131,36 +137,46 @@ class PhoneVerificationService:
             True if verification successful, False otherwise
         """
         # Get user
-        user = await self.db.get(User, user_id)
+        user = await zerodb_client.get_by_id(
+            table_name="users",
+            id=str(user_id)
+        )
         if not user:
             return False
 
         # Check if phone number matches
-        if user.phone_number != phone_number:
+        if user.get("phone_number") != phone_number:
             return False
 
         # Check if code exists
-        if not user.phone_verification_code:
+        if not user.get("phone_verification_code"):
             return False
 
         # Check if code matches
-        if user.phone_verification_code != verification_code:
+        if user.get("phone_verification_code") != verification_code:
             return False
 
         # Check if code has expired
-        if not user.phone_verification_expires_at:
+        expires_at_str = user.get("phone_verification_expires_at")
+        if not expires_at_str:
             return False
 
-        if user.phone_verification_expires_at < datetime.utcnow():
+        # Parse ISO timestamp
+        expires_at = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00'))
+        if expires_at < datetime.utcnow():
             return False
 
         # Verification successful
-        user.phone_verified = True
-        user.phone_verification_code = None  # Clear code after use
-        user.phone_verification_expires_at = None
-        user.updated_at = datetime.utcnow()
-
-        await self.db.commit()
+        await zerodb_client.update_rows(
+            table_name="users",
+            filter={"id": str(user_id)},
+            update={"$set": {
+                "phone_verified": True,
+                "phone_verification_code": None,
+                "phone_verification_expires_at": None,
+                "updated_at": datetime.utcnow().isoformat()
+            }}
+        )
 
         return True
 
@@ -174,8 +190,11 @@ class PhoneVerificationService:
         Returns:
             True if phone is verified
         """
-        user = await self.db.get(User, user_id)
+        user = await zerodb_client.get_by_id(
+            table_name="users",
+            id=str(user_id)
+        )
         if not user:
             return False
 
-        return user.phone_verified
+        return user.get("phone_verified", False)

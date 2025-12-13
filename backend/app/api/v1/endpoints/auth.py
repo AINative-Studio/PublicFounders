@@ -7,11 +7,9 @@ from typing import Optional
 from datetime import timedelta
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from fastapi.responses import RedirectResponse
-from sqlalchemy.ext.asyncio import AsyncSession
 import httpx
 
 from app.core.config import settings
-from app.core.database import get_db
 from app.core.security import create_access_token
 from app.services.auth_service import AuthService
 from app.services.phone_verification_service import PhoneVerificationService
@@ -48,8 +46,7 @@ async def initiate_linkedin_oauth():
 
 @router.get("/linkedin/callback")
 async def linkedin_oauth_callback(
-    code: str = Query(..., description="Authorization code from LinkedIn"),
-    db: AsyncSession = Depends(get_db)
+    code: str = Query(..., description="Authorization code from LinkedIn")
 ):
     """
     LinkedIn OAuth callback handler
@@ -116,15 +113,15 @@ async def linkedin_oauth_callback(
                 email=linkedin_user.get("email")
             )
 
-            # Create or get existing user
-            auth_service = AuthService(db)
+            # Create or get existing user (no DB session needed with ZeroDB)
+            auth_service = AuthService()
             user, profile, created = await auth_service.get_or_create_user_from_linkedin(linkedin_data)
 
             # Create JWT token
             token_payload = {
-                "sub": str(user.id),
-                "linkedin_id": user.linkedin_id,
-                "email": user.email
+                "sub": user["id"],
+                "linkedin_id": user["linkedin_id"],
+                "email": user["email"]
             }
 
             jwt_token = create_access_token(
@@ -136,7 +133,7 @@ async def linkedin_oauth_callback(
                 "access_token": jwt_token,
                 "token_type": "bearer",
                 "expires_in": settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60,  # seconds
-                "user": UserResponse.from_orm(user),
+                "user": user,  # Already a dict from ZeroDB
                 "created": created
             }
 
@@ -152,15 +149,14 @@ async def linkedin_oauth_callback(
 @router.post("/verify-phone", status_code=status.HTTP_200_OK)
 async def send_phone_verification(
     request: PhoneVerificationRequest,
-    user_id: uuid.UUID = Query(..., description="User ID"),
-    db: AsyncSession = Depends(get_db)
+    user_id: uuid.UUID = Query(..., description="User ID")
 ):
     """
     Send phone verification code via SMS
 
     Generates a 6-digit code and sends it to the provided phone number
     """
-    phone_service = PhoneVerificationService(db)
+    phone_service = PhoneVerificationService()
 
     try:
         success = await phone_service.send_verification_code(
@@ -195,15 +191,14 @@ async def send_phone_verification(
 @router.post("/confirm-phone", status_code=status.HTTP_200_OK)
 async def confirm_phone_verification(
     request: PhoneVerificationConfirm,
-    user_id: uuid.UUID = Query(..., description="User ID"),
-    db: AsyncSession = Depends(get_db)
+    user_id: uuid.UUID = Query(..., description="User ID")
 ):
     """
     Confirm phone verification with code
 
     Validates the verification code and marks phone as verified
     """
-    phone_service = PhoneVerificationService(db)
+    phone_service = PhoneVerificationService()
 
     try:
         success = await phone_service.verify_phone(

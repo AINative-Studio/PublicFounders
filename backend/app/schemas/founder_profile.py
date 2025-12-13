@@ -5,7 +5,7 @@ Pydantic models for founder profile data validation
 from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel, Field, UUID4
-from app.models.founder_profile import AutonomyMode
+from app.core.enums import AutonomyMode
 
 
 class FounderProfileCreate(BaseModel):

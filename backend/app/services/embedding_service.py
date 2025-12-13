@@ -23,6 +23,17 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Lazy import to avoid circular dependency
+_observability_service = None
+
+def get_observability_service():
+    """Lazy load observability service to avoid circular imports."""
+    global _observability_service
+    if _observability_service is None:
+        from app.services.observability_service import observability_service
+        _observability_service = observability_service
+    return _observability_service
+
 
 class EmbeddingServiceError(Exception):
     """Base exception for embedding service errors."""
@@ -92,6 +103,15 @@ class EmbeddingService:
                     raise EmbeddingServiceError(
                         f"Expected {self.EMBEDDING_DIMENSION} dimensions, got {len(embedding)}"
                     )
+
+                # Track embedding cost (approx. token count)
+                token_count = len(text.split()) * 1.3  # Rough estimate
+                obs_service = get_observability_service()
+                await obs_service.track_embedding_cost(
+                    operation="generate",
+                    tokens=int(token_count),
+                    model="BAAI/bge-small-en-v1.5"
+                )
 
                 return embedding
 
