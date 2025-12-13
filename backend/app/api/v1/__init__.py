@@ -3,7 +3,7 @@ API v1 Router
 Combines all endpoint routers
 """
 from fastapi import APIRouter
-from app.api.v1.endpoints import auth, profile, goals, asks, posts
+from app.api.v1.endpoints import auth, profile, goals, asks, posts, introductions
 
 api_router = APIRouter()
 
@@ -15,3 +15,6 @@ api_router.include_router(profile.router, prefix="/profile", tags=["Profile"])
 api_router.include_router(goals.router, tags=["Goals"])
 api_router.include_router(asks.router, tags=["Asks"])
 api_router.include_router(posts.router, tags=["Posts"])
+
+# Sprint 3: Introductions
+api_router.include_router(introductions.router, tags=["Introductions"])

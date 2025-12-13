@@ -18,6 +18,13 @@ from app.schemas.auth import (
     PhoneVerificationRequest,
     PhoneVerificationConfirm
 )
+from app.schemas.introduction import (
+    IntroductionRequest,
+    IntroductionResponseRequest,
+    IntroductionCompletion,
+    IntroductionResponse,
+    IntroductionListResponse
+)
 
 __all__ = [
     "UserResponse",
@@ -31,4 +38,9 @@ __all__ = [
     "TokenData",
     "PhoneVerificationRequest",
     "PhoneVerificationConfirm",
+    "IntroductionRequest",
+    "IntroductionResponseRequest",
+    "IntroductionCompletion",
+    "IntroductionResponse",
+    "IntroductionListResponse",
 ]
