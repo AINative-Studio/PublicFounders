@@ -14,6 +14,12 @@ from app.services.autonomy_controls_service import (
     require_permission,
     PermissionDeniedError,
 )
+from app.services.audit_log_service import (
+    AuditLogService,
+    audit_log_service,
+    ImmutableLogError,
+    LogNotFoundError,
+)
 
 __all__ = [
     "AuthService",
@@ -27,4 +33,8 @@ __all__ = [
     "autonomy_controls_service",
     "require_permission",
     "PermissionDeniedError",
+    "AuditLogService",
+    "audit_log_service",
+    "ImmutableLogError",
+    "LogNotFoundError",
 ]
