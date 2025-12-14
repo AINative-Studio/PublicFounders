@@ -18,3 +18,6 @@ api_router.include_router(posts.router, tags=["Posts"])
 
 # Sprint 3: Introductions
 api_router.include_router(introductions.router, tags=["Introductions"])
+
+# Story 8.1: Outcomes (separate router for analytics)
+api_router.include_router(introductions.analytics_router, tags=["Outcomes"])

@@ -11,6 +11,10 @@ Endpoints:
 - GET    /api/v1/introductions/{intro_id} - Get specific introduction
 - PUT    /api/v1/introductions/{intro_id}/respond - Respond to introduction
 - PUT    /api/v1/introductions/{intro_id}/complete - Mark introduction complete
+- POST   /api/v1/introductions/{intro_id}/outcome - Record outcome (Story 8.1)
+- GET    /api/v1/introductions/{intro_id}/outcome - Get outcome (Story 8.1)
+- PATCH  /api/v1/introductions/{intro_id}/outcome - Update outcome (Story 8.1)
+- GET    /api/v1/outcomes/analytics - Get outcome analytics (Story 8.1)
 """
 import logging
 from typing import List, Optional
@@ -37,6 +41,14 @@ from app.schemas.introduction import (
     GoalHelper,
     AskMatcher
 )
+from app.schemas.outcome import (
+    OutcomeCreate,
+    OutcomeUpdate,
+    OutcomeResponse,
+    OutcomeAnalytics,
+    OutcomeType
+)
+from app.services.outcome_service import outcome_service, OutcomeServiceError
 
 logger = logging.getLogger(__name__)
 
@@ -531,4 +543,231 @@ async def complete_introduction(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to complete introduction"
+        )
+
+
+# Story 8.1: Outcome Tracking Endpoints
+
+@router.post(
+    "/{intro_id}/outcome",
+    response_model=OutcomeResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Record introduction outcome",
+    description="""
+    Record the outcome of an introduction.
+
+    - **outcome_type**: Type of outcome (successful, unsuccessful, no_response, not_relevant)
+    - **feedback_text**: Optional detailed feedback (10-500 chars)
+    - **rating**: Optional rating from 1 (poor) to 5 (excellent)
+    - **tags**: Optional tags for categorization (max 10)
+
+    Only introduction participants (requester or target) can record outcomes.
+    Each introduction can only have one outcome - use PATCH to update.
+
+    Outcomes are tracked in RLHF system to improve future matching quality.
+    """
+)
+async def record_introduction_outcome(
+    intro_id: UUID,
+    outcome_data: OutcomeCreate,
+    current_user: dict = Depends(get_current_user)
+) -> OutcomeResponse:
+    """
+    Record outcome for an introduction.
+
+    Creates an outcome record with feedback, rating, and tags.
+    Tracks outcome in RLHF system for learning and improving matching.
+    Only participants can record outcomes.
+    """
+    try:
+        outcome = await outcome_service.record_outcome(
+            intro_id=intro_id,
+            user_id=UUID(current_user["id"]),
+            outcome_type=outcome_data.outcome_type,
+            feedback_text=outcome_data.feedback_text,
+            rating=outcome_data.rating,
+            tags=outcome_data.tags
+        )
+
+        logger.info(
+            f"User {current_user['id']} recorded outcome for introduction {intro_id}: "
+            f"{outcome_data.outcome_type.value}"
+        )
+
+        return OutcomeResponse(**outcome)
+
+    except OutcomeServiceError as e:
+        logger.warning(f"Outcome recording failed: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error recording outcome: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to record outcome"
+        )
+
+
+@router.get(
+    "/{intro_id}/outcome",
+    response_model=OutcomeResponse,
+    summary="Get introduction outcome",
+    description="""
+    Get the outcome recorded for an introduction.
+
+    Returns outcome details including type, feedback, rating, and tags.
+    Returns 404 if no outcome has been recorded yet.
+    """
+)
+async def get_introduction_outcome(
+    intro_id: UUID,
+    current_user: dict = Depends(get_current_user)
+) -> OutcomeResponse:
+    """
+    Get outcome for an introduction.
+
+    Retrieves the recorded outcome if it exists.
+    """
+    try:
+        outcome = await outcome_service.get_outcome(intro_id)
+
+        if not outcome:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No outcome recorded for this introduction"
+            )
+
+        return OutcomeResponse(**outcome)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting outcome for intro {intro_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get outcome"
+        )
+
+
+@router.patch(
+    "/{intro_id}/outcome",
+    response_model=OutcomeResponse,
+    summary="Update introduction outcome",
+    description="""
+    Update an existing introduction outcome.
+
+    Can update any combination of:
+    - **outcome_type**: Change the outcome type
+    - **feedback_text**: Update feedback text
+    - **rating**: Update rating
+    - **tags**: Update tags
+
+    Only introduction participants can update outcomes.
+    Updated outcomes are re-tracked in RLHF system.
+    """
+)
+async def update_introduction_outcome(
+    intro_id: UUID,
+    outcome_data: OutcomeUpdate,
+    current_user: dict = Depends(get_current_user)
+) -> OutcomeResponse:
+    """
+    Update an existing outcome.
+
+    Updates outcome fields and re-tracks in RLHF for learning.
+    Only participants can update.
+    """
+    try:
+        # Validate at least one field is provided
+        if all(
+            getattr(outcome_data, field) is None
+            for field in ["outcome_type", "feedback_text", "rating", "tags"]
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="At least one field must be provided for update"
+            )
+
+        outcome = await outcome_service.update_outcome(
+            intro_id=intro_id,
+            user_id=UUID(current_user["id"]),
+            outcome_type=outcome_data.outcome_type,
+            feedback_text=outcome_data.feedback_text,
+            rating=outcome_data.rating,
+            tags=outcome_data.tags
+        )
+
+        logger.info(
+            f"User {current_user['id']} updated outcome for introduction {intro_id}"
+        )
+
+        return OutcomeResponse(**outcome)
+
+    except OutcomeServiceError as e:
+        logger.warning(f"Outcome update failed: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error updating outcome: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update outcome"
+        )
+
+
+# Analytics endpoint (using separate router for /outcomes prefix)
+analytics_router = APIRouter(prefix="/outcomes", tags=["outcomes"])
+
+
+@analytics_router.get(
+    "/analytics",
+    response_model=OutcomeAnalytics,
+    summary="Get outcome analytics",
+    description="""
+    Get comprehensive analytics about your introduction outcomes.
+
+    Returns:
+    - Total outcome count
+    - Breakdown by outcome type with percentages
+    - Average rating across all outcomes
+    - Success rate (% successful outcomes)
+    - Response rate (% that received responses)
+    - Top tags used
+    - Optional date range filtering
+
+    Useful for understanding introduction effectiveness and areas for improvement.
+    """
+)
+async def get_outcome_analytics(
+    current_user: dict = Depends(get_current_user)
+) -> OutcomeAnalytics:
+    """
+    Get outcome analytics for authenticated user.
+
+    Provides comprehensive statistics about introduction outcomes
+    to help users understand their networking effectiveness.
+    """
+    try:
+        analytics = await outcome_service.get_outcome_analytics(
+            user_id=UUID(current_user["id"])
+        )
+
+        logger.info(
+            f"Generated outcome analytics for user {current_user['id']}: "
+            f"{analytics['total_outcomes']} outcomes"
+        )
+
+        return OutcomeAnalytics(**analytics)
+
+    except Exception as e:
+        logger.error(f"Error generating analytics: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to generate analytics"
         )
