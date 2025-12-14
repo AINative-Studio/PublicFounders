@@ -2,12 +2,28 @@
 FastAPI Application Entry Point
 PublicFounders - Semantic AI Founder Network
 """
+import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from app.core.config import settings
-from app.api.v1 import api_router
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Import API router with error handling
+try:
+    from app.api.v1 import api_router
+    logger.info(f"API router imported successfully with {len(api_router.routes)} routes")
+except Exception as e:
+    logger.error(f"Failed to import API router: {type(e).__name__}: {str(e)}")
+    logger.exception("Full traceback:")
+    # Create empty router as fallback
+    from fastapi import APIRouter
+    api_router = APIRouter()
+    logger.warning("Using empty API router as fallback")
 
 
 @asynccontextmanager
