@@ -20,10 +20,10 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
     PORT: int = 8000
 
-    # Database
-    DATABASE_URL: str = Field(
-        default="postgresql://postgres:postgres@localhost:5432/publicfounders",
-        description="PostgreSQL connection string"
+    # Database (Optional - using ZeroDB instead)
+    DATABASE_URL: Optional[str] = Field(
+        default=None,
+        description="PostgreSQL connection string (optional - using ZeroDB)"
     )
 
     # JWT Authentication
@@ -69,24 +69,28 @@ class Settings(BaseSettings):
     EMBEDDING_DIMENSIONS: int = 384
 
     # CORS
-    CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:8000"]
+    CORS_ORIGINS: str = "http://localhost:3000,http://localhost:3001,http://localhost:8000"
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        """Convert CORS_ORIGINS string to list"""
+        return [origin.strip() for origin in self.CORS_ORIGINS.split(",")]
 
     # Phone Verification Settings
     PHONE_VERIFICATION_CODE_LENGTH: int = 6
     PHONE_VERIFICATION_CODE_EXPIRY_MINUTES: int = 5
 
     model_config = SettingsConfigDict(
-        env_file="../.env",
+        env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=True,
         extra="ignore"
     )
 
     @validator("DATABASE_URL", pre=True)
-    def validate_database_url(cls, v: str) -> str:
-        """Ensure database URL is properly formatted"""
-        if not v or v == "":
-            raise ValueError("DATABASE_URL must be set")
+    def validate_database_url(cls, v: Optional[str]) -> Optional[str]:
+        """Ensure database URL is properly formatted if provided"""
+        # DATABASE_URL is optional since we're using ZeroDB
         return v
 
 
