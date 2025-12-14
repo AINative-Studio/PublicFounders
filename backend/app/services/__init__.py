@@ -8,6 +8,12 @@ from app.services.zerodb_service import zerodb_service
 from app.services.profile_service import ProfileService
 from app.services.phone_verification_service import PhoneVerificationService
 from app.services.advisor_agent_service import AdvisorAgentService, advisor_agent_service
+from app.services.autonomy_controls_service import (
+    AutonomyControlsService,
+    autonomy_controls_service,
+    require_permission,
+    PermissionDeniedError,
+)
 
 __all__ = [
     "AuthService",
@@ -17,4 +23,8 @@ __all__ = [
     "PhoneVerificationService",
     "AdvisorAgentService",
     "advisor_agent_service",
+    "AutonomyControlsService",
+    "autonomy_controls_service",
+    "require_permission",
+    "PermissionDeniedError",
 ]

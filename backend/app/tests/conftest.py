@@ -210,16 +210,22 @@ def sample_user_with_profile_and_agent_dict() -> tuple[dict, dict, dict]:
 @pytest.fixture
 def mock_zerodb_client():
     """
-    Mock ZeroDB client for advisor agent testing
+    Mock ZeroDB client for advisor agent and autonomy controls testing
+    Patches multiple services that use zerodb_client
     """
-    with patch('app.services.advisor_agent_service.zerodb_client') as mock:
-        mock.insert_rows = AsyncMock(return_value={"success": True, "inserted": 1})
-        mock.query_rows = AsyncMock(return_value=[])
-        mock.update_rows = AsyncMock(return_value={"success": True, "updated": 1})
-        mock.delete_rows = AsyncMock(return_value={"success": True, "deleted": 1})
-        mock.get_by_id = AsyncMock(return_value=None)
-        mock.get_by_field = AsyncMock(return_value=None)
-        yield mock
+    with patch('app.services.advisor_agent_service.zerodb_client') as mock_advisor, \
+         patch('app.services.autonomy_controls_service.zerodb_client') as mock_autonomy:
+        # Configure mock methods for both patches
+        for mock in [mock_advisor, mock_autonomy]:
+            mock.insert_rows = AsyncMock(return_value={"success": True, "inserted": 1})
+            mock.query_rows = AsyncMock(return_value=[])
+            mock.update_rows = AsyncMock(return_value={"success": True, "updated": 1})
+            mock.delete_rows = AsyncMock(return_value={"success": True, "deleted": 1})
+            mock.get_by_id = AsyncMock(return_value=None)
+            mock.get_by_field = AsyncMock(return_value=None)
+
+        # Return the autonomy mock as primary (tests can configure either)
+        yield mock_autonomy
 
 
 @pytest.fixture
