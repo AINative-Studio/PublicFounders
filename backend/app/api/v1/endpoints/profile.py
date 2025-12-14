@@ -74,29 +74,45 @@ async def get_my_profile(
 
     Returns user data and founder profile
     """
+    logger.info(f"=== /profile/me endpoint called ===")
+    logger.info(f"User ID from token: {current_user_id}")
+
     profile_service = ProfileService()
     auth_service = AuthService()
 
     # Get user
+    logger.info(f"Fetching user data for ID: {current_user_id}")
     user = await auth_service.get_user_by_id(current_user_id)
     if not user:
+        logger.error(f"User not found in database: {current_user_id}")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found"
         )
+    logger.info(f"User found: {user.get('email', 'N/A')}")
 
     # Get profile
+    logger.info(f"Fetching profile for user ID: {current_user_id}")
     profile = await profile_service.get_profile(current_user_id)
     if not profile:
+        logger.error(f"Profile not found for user: {current_user_id}")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Profile not found"
         )
+    logger.info(f"Profile found successfully")
 
-    return {
-        "user": UserResponse.model_validate(user),
-        "profile": FounderProfileResponse.model_validate(profile)
-    }
+    try:
+        response = {
+            "user": UserResponse.model_validate(user),
+            "profile": FounderProfileResponse.model_validate(profile)
+        }
+        logger.info(f"Profile response prepared successfully")
+        return response
+    except Exception as e:
+        logger.error(f"Error validating response models: {type(e).__name__}: {str(e)}")
+        logger.exception("Full traceback:")
+        raise
 
 
 @router.put("/me", response_model=FounderProfileResponse)

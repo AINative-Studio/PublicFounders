@@ -46,14 +46,22 @@ async def initiate_linkedin_oauth():
 
 @router.get("/linkedin/callback")
 async def linkedin_oauth_callback(
-    code: str = Query(..., description="Authorization code from LinkedIn")
+    code: str = Query(..., description="Authorization code from LinkedIn"),
+    state: Optional[str] = Query(None, description="Frontend origin URL for redirect")
 ):
     """
     LinkedIn OAuth callback handler
 
     Exchanges authorization code for access token and creates/logs in user
+    Redirects to frontend with JWT token in URL
     """
+    logger.info(f"=== LinkedIn OAuth Callback Started ===")
+    logger.info(f"Code received: {code[:15]}... (length: {len(code)})")
+    logger.info(f"State parameter: {state}")
+    logger.info(f"Redirect URI configured: {settings.LINKEDIN_REDIRECT_URI}")
+
     if not settings.LINKEDIN_CLIENT_ID or not settings.LINKEDIN_CLIENT_SECRET:
+        logger.error("LinkedIn OAuth credentials not configured")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="LinkedIn OAuth not configured"
@@ -75,6 +83,8 @@ async def linkedin_oauth_callback(
             )
 
             if token_response.status_code != 200:
+                logger.error(f"LinkedIn token exchange failed: {token_response.status_code}")
+                logger.error(f"Response: {token_response.text}")
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Failed to get access token from LinkedIn"
@@ -82,6 +92,7 @@ async def linkedin_oauth_callback(
 
             token_data = token_response.json()
             access_token = token_data.get("access_token")
+            logger.info(f"Successfully received access token from LinkedIn")
 
             if not access_token:
                 raise HTTPException(
@@ -90,32 +101,50 @@ async def linkedin_oauth_callback(
                 )
 
             # Get user info from LinkedIn
+            logger.info("Fetching user info from LinkedIn API")
             user_info_response = await client.get(
                 "https://api.linkedin.com/v2/userinfo",
                 headers={"Authorization": f"Bearer {access_token}"}
             )
 
             if user_info_response.status_code != 200:
+                logger.error(f"LinkedIn user info fetch failed: {user_info_response.status_code}")
+                logger.error(f"Response: {user_info_response.text}")
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Failed to get user info from LinkedIn"
                 )
 
             linkedin_user = user_info_response.json()
+            logger.info(f"LinkedIn user data received: {linkedin_user.get('sub', 'N/A')}, {linkedin_user.get('email', 'N/A')}")
 
             # Map LinkedIn data to our schema
+            # Handle location - LinkedIn returns dict like {'country': 'US', 'language': 'en'}
+            location_data = linkedin_user.get("locale")
+            location_str = None
+            if location_data:
+                if isinstance(location_data, dict):
+                    # Extract country and language from dict
+                    country = location_data.get("country", "")
+                    language = location_data.get("language", "")
+                    location_str = f"{country}_{language}" if country and language else country or language
+                else:
+                    location_str = str(location_data)
+
             linkedin_data = LinkedInUserData(
                 linkedin_id=linkedin_user.get("sub"),
                 name=linkedin_user.get("name", ""),
                 headline=linkedin_user.get("headline"),
                 profile_photo_url=linkedin_user.get("picture"),
-                location=linkedin_user.get("locale"),
+                location=location_str,
                 email=linkedin_user.get("email")
             )
 
             # Create or get existing user (no DB session needed with ZeroDB)
+            logger.info("Creating or retrieving user from database")
             auth_service = AuthService()
             user, profile, created = await auth_service.get_or_create_user_from_linkedin(linkedin_data)
+            logger.info(f"User {'created' if created else 'found'}: {user.get('id', 'N/A')}")
 
             # Create JWT token
             token_payload = {
@@ -128,7 +157,16 @@ async def linkedin_oauth_callback(
                 token_payload,
                 expires_delta=timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
             )
+            logger.info(f"JWT token created successfully")
 
+            # If state parameter provided (frontend origin), redirect to frontend
+            if state:
+                # Redirect to frontend with token and user info
+                frontend_callback_url = f"{state}/auth/callback?token={jwt_token}&created={str(created).lower()}"
+                logger.info(f"Redirecting to frontend: {frontend_callback_url[:50]}...")
+                return RedirectResponse(url=frontend_callback_url)
+
+            # Otherwise return JSON (for API clients)
             return {
                 "access_token": jwt_token,
                 "token_type": "bearer",
@@ -137,9 +175,12 @@ async def linkedin_oauth_callback(
                 "created": created
             }
 
-    except HTTPException:
+    except HTTPException as e:
+        logger.error(f"HTTP Exception in OAuth flow: {e.status_code} - {e.detail}")
         raise
     except Exception as e:
+        logger.error(f"Unexpected error in OAuth flow: {type(e).__name__}: {str(e)}")
+        logger.exception("Full traceback:")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"OAuth flow failed: {str(e)}"
