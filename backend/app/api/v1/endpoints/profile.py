@@ -94,8 +94,8 @@ async def get_my_profile(
         )
 
     return {
-        "user": UserResponse.from_orm(user),
-        "profile": FounderProfileResponse.from_orm(profile)
+        "user": UserResponse.model_validate(user),
+        "profile": FounderProfileResponse.model_validate(profile)
     }
 
 
@@ -170,7 +170,7 @@ async def update_my_profile(
             update_data=update_data
         )
 
-        return FounderProfileResponse.from_orm(updated_profile)
+        return FounderProfileResponse.model_validate(updated_profile)
 
     except ValueError as e:
         raise HTTPException(
@@ -221,8 +221,8 @@ async def get_user_profile(
         )
 
     return {
-        "user": UserResponse.from_orm(user),
-        "profile": FounderProfileResponse.from_orm(profile)
+        "user": UserResponse.model_validate(user),
+        "profile": FounderProfileResponse.model_validate(profile)
     }
 
 
