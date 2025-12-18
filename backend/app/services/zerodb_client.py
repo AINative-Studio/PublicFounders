@@ -15,13 +15,19 @@ Tables:
 - introductions: Introduction tracking
 """
 import logging
-import httpx
 from typing import Any, Dict, List, Optional
-from datetime import datetime
-from uuid import UUID
+import httpx
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Import MCP tools wrapper
+try:
+    from ainative_mcp_wrapper import ZeroDBMCPClient
+    HAS_MCP = True
+except ImportError:
+    HAS_MCP = False
+    logger.warning("MCP wrapper not available, using fallback implementation")
 
 
 class ZeroDBClient:
@@ -264,7 +270,7 @@ class ZeroDBClient:
             logger.error(f"Error updating {table_name}: {e.response.text}")
             raise
         except Exception as e:
-            logger.error(f"Error updating {table_name}: {e}")
+            logger.error(f"Error updating rows in {table_name}: {e}")
             raise
 
     async def delete_rows(
@@ -311,7 +317,7 @@ class ZeroDBClient:
             logger.error(f"Error deleting from {table_name}: {e.response.text}")
             raise
         except Exception as e:
-            logger.error(f"Error deleting from {table_name}: {e}")
+            logger.error(f"Error deleting rows from {table_name}: {e}")
             raise
 
     async def get_by_id(
@@ -320,14 +326,7 @@ class ZeroDBClient:
         id: str
     ) -> Optional[Dict[str, Any]]:
         """
-        Get a single row by ID (convenience method).
-
-        Args:
-            table_name: Name of the table
-            id: Row ID (as string)
-
-        Returns:
-            Row dictionary or None if not found
+        Get a single row by ID.
         """
         # Fetch all rows since ZeroDB doesn't support server-side filtering
         # Then apply client-side filter to find the matching ID
@@ -345,15 +344,7 @@ class ZeroDBClient:
         value: Any
     ) -> Optional[Dict[str, Any]]:
         """
-        Get a single row by field value (convenience method).
-
-        Args:
-            table_name: Name of the table
-            field: Field name
-            value: Field value
-
-        Returns:
-            Row dictionary or None if not found
+        Get a single row by any field value.
         """
         # Fetch all rows since ZeroDB doesn't support server-side filtering
         # Then apply client-side filter to find the matching field
@@ -364,65 +355,28 @@ class ZeroDBClient:
         )
         return rows[0] if rows else None
 
-    # Helper methods for common patterns
-
-    def prepare_insert_data(
-        self,
-        data: Dict[str, Any],
-        id: Optional[UUID] = None,
-        add_timestamps: bool = True
-    ) -> Dict[str, Any]:
+    async def list_tables(self, limit: int = 100) -> List[Dict[str, Any]]:
         """
-        Prepare data for insertion with ID and timestamps.
-
-        Args:
-            data: Raw data dictionary
-            id: Optional UUID (will generate if not provided)
-            add_timestamps: Whether to add created_at/updated_at
-
-        Returns:
-            Data dictionary ready for insertion
+        List all tables in the project.
         """
-        from uuid import uuid4
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{self.base_url}/database/tables",
+                    headers=self._get_headers(),
+                    timeout=30.0
+                )
+                response.raise_for_status()
+                data = response.json()
 
-        prepared = {**data}
-
-        if id:
-            prepared["id"] = str(id)
-        elif "id" not in prepared:
-            prepared["id"] = str(uuid4())
-
-        if add_timestamps:
-            now = datetime.utcnow().isoformat()
-            if "created_at" not in prepared:
-                prepared["created_at"] = now
-            if "updated_at" not in prepared:
-                prepared["updated_at"] = now
-
-        return prepared
-
-    def prepare_update_data(
-        self,
-        data: Dict[str, Any],
-        add_timestamp: bool = True
-    ) -> Dict[str, Any]:
-        """
-        Prepare data for update operation.
-
-        Args:
-            data: Fields to update
-            add_timestamp: Whether to add updated_at
-
-        Returns:
-            Update dictionary with $set operator
-        """
-        update_data = {**data}
-
-        if add_timestamp:
-            update_data["updated_at"] = datetime.utcnow().isoformat()
-
-        return {"$set": update_data}
+                # Handle pagination response format
+                tables = data.get("data", []) if isinstance(data, dict) else data
+                logger.debug(f"Listed {len(tables)} tables")
+                return tables[:limit]
+        except Exception as e:
+            logger.error(f"Error listing tables: {e}")
+            raise
 
 
-# Singleton instance
+# Global singleton instance
 zerodb_client = ZeroDBClient()

@@ -2,6 +2,7 @@
 Authentication API Endpoints
 LinkedIn OAuth, JWT tokens, and phone verification
 """
+import logging
 import uuid
 from typing import Optional
 from datetime import timedelta
@@ -15,6 +16,8 @@ from app.services.auth_service import AuthService
 from app.services.phone_verification_service import PhoneVerificationService
 from app.schemas.auth import Token, PhoneVerificationRequest, PhoneVerificationConfirm
 from app.schemas.user import LinkedInUserData, UserResponse
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -36,7 +39,7 @@ async def initiate_linkedin_oauth(
 
     # Use state parameter to pass frontend redirect URI
     import base64
-    state = base64.urlsafe_b64encode((redirect_uri or "http://localhost:3000/auth/callback").encode()).decode()
+    state = base64.urlsafe_b64encode((redirect_uri or "http://localhost:4000/auth/callback").encode()).decode()
 
     # Build LinkedIn authorization URL
     auth_url = (
@@ -65,8 +68,13 @@ async def linkedin_oauth_callback(
     import base64
     import urllib.parse
 
+    logger.info(f"=== LinkedIn OAuth Callback Started ===")
+    logger.info(f"Code received: {code[:15]}... (length: {len(code)})")
+    logger.info(f"State parameter: {state}")
+    logger.info(f"Redirect URI configured: {settings.LINKEDIN_REDIRECT_URI}")
+
     # Decode frontend redirect URI from state
-    frontend_redirect = "http://localhost:3000/auth/callback"
+    frontend_redirect = "http://localhost:4000/auth/callback"
     if state:
         try:
             frontend_redirect = base64.urlsafe_b64decode(state.encode()).decode()
@@ -74,6 +82,7 @@ async def linkedin_oauth_callback(
             pass  # Use default if decode fails
 
     if not settings.LINKEDIN_CLIENT_ID or not settings.LINKEDIN_CLIENT_SECRET:
+        logger.error("LinkedIn OAuth credentials not configured")
         error_url = f"{frontend_redirect}?error=config_error&error_description=LinkedIn+OAuth+not+configured"
         return RedirectResponse(url=error_url)
 
@@ -93,27 +102,34 @@ async def linkedin_oauth_callback(
             )
 
             if token_response.status_code != 200:
+                logger.error(f"LinkedIn token exchange failed: {token_response.status_code}")
+                logger.error(f"Response: {token_response.text}")
                 error_url = f"{frontend_redirect}?error=token_error&error_description=Failed+to+get+access+token+from+LinkedIn"
                 return RedirectResponse(url=error_url)
 
             token_data = token_response.json()
             access_token = token_data.get("access_token")
+            logger.info(f"Successfully received access token from LinkedIn")
 
             if not access_token:
                 error_url = f"{frontend_redirect}?error=token_error&error_description=No+access+token+received"
                 return RedirectResponse(url=error_url)
 
             # Get user info from LinkedIn
+            logger.info("Fetching user info from LinkedIn API")
             user_info_response = await client.get(
                 "https://api.linkedin.com/v2/userinfo",
                 headers={"Authorization": f"Bearer {access_token}"}
             )
 
             if user_info_response.status_code != 200:
+                logger.error(f"LinkedIn user info fetch failed: {user_info_response.status_code}")
+                logger.error(f"Response: {user_info_response.text}")
                 error_url = f"{frontend_redirect}?error=user_info_error&error_description=Failed+to+get+user+info"
                 return RedirectResponse(url=error_url)
 
             linkedin_user = user_info_response.json()
+            logger.info(f"LinkedIn user data received: {linkedin_user.get('sub', 'N/A')}, {linkedin_user.get('email', 'N/A')}")
 
             # Handle locale - LinkedIn returns it as an object {'country': 'US', 'language': 'en'}
             locale_data = linkedin_user.get("locale")
@@ -121,7 +137,6 @@ async def linkedin_oauth_callback(
             if locale_data:
                 if isinstance(locale_data, dict):
                     country = locale_data.get("country", "")
-                    language = locale_data.get("language", "")
                     location_str = f"{country}" if country else None
                 elif isinstance(locale_data, str):
                     location_str = locale_data
@@ -140,8 +155,10 @@ async def linkedin_oauth_callback(
             )
 
             # Create or get existing user (no DB session needed with ZeroDB)
+            logger.info("Creating or retrieving user from database")
             auth_service = AuthService()
             user, profile, created = await auth_service.get_or_create_user_from_linkedin(linkedin_data)
+            logger.info(f"User {'created' if created else 'found'}: {user.get('id', 'N/A')}")
 
             # Create JWT token
             token_payload = {
@@ -154,6 +171,7 @@ async def linkedin_oauth_callback(
                 token_payload,
                 expires_delta=timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
             )
+            logger.info(f"JWT token created successfully")
 
             # Redirect to frontend with token
             params = {
@@ -167,6 +185,8 @@ async def linkedin_oauth_callback(
             return RedirectResponse(url=success_url)
 
     except Exception as e:
+        logger.error(f"Unexpected error in OAuth flow: {type(e).__name__}: {str(e)}")
+        logger.exception("Full traceback:")
         error_msg = urllib.parse.quote(str(e))
         error_url = f"{frontend_redirect}?error=oauth_error&error_description={error_msg}"
         return RedirectResponse(url=error_url)

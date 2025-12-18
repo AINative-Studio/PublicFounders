@@ -74,22 +74,31 @@ async def get_my_profile(
 
     Returns user data and founder profile (creates default profile if none exists)
     """
+    logger.info(f"=== /profile/me endpoint called ===")
+    logger.info(f"User ID from token: {current_user_id}")
+
     profile_service = ProfileService()
     auth_service = AuthService()
 
     # Get user
+    logger.info(f"Fetching user data for ID: {current_user_id}")
     user = await auth_service.get_user_by_id(current_user_id)
     if not user:
+        logger.error(f"User not found in database: {current_user_id}")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found"
         )
+    logger.info(f"User found: {user.get('email', 'N/A')}")
 
     # Get or create profile
+    logger.info(f"Fetching profile for user ID: {current_user_id}")
     profile = await profile_service.get_profile(current_user_id)
     if not profile:
         # Create a default profile for new users
+        logger.info(f"Creating default profile for user: {current_user_id}")
         profile = await profile_service.create_default_profile(current_user_id, user)
+    logger.info(f"Profile found/created successfully")
 
     # Return user data (handle both dict and ORM object)
     if isinstance(user, dict):
@@ -179,7 +188,7 @@ async def update_my_profile(
             update_data=update_data
         )
 
-        return FounderProfileResponse.from_orm(updated_profile)
+        return FounderProfileResponse.model_validate(updated_profile)
 
     except ValueError as e:
         raise HTTPException(
