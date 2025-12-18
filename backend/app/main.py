@@ -47,7 +47,7 @@ app = FastAPI(
     openapi_url="/api/openapi.json"
 )
 
-# Configure CORS - explicit origins for local development
+# Configure CORS - local development and production
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -56,6 +56,8 @@ app.add_middleware(
         "http://localhost:4000",
         "http://localhost:8000",
         "http://localhost:9000",
+        "https://publicfounders.ainative.studio",
+        "https://foundersapi.ainative.studio",
     ],
     allow_credentials=True,
     allow_methods=["*"],

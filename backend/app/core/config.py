@@ -74,7 +74,9 @@ class Settings(BaseSettings):
         "http://localhost:3001",
         "http://localhost:4000",
         "http://localhost:8000",
-        "http://localhost:9000"
+        "http://localhost:9000",
+        "https://publicfounders.ainative.studio",
+        "https://foundersapi.ainative.studio"
     ]
 
     # Phone Verification Settings
