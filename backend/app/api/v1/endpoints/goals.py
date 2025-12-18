@@ -16,6 +16,8 @@ from datetime import datetime
 from typing import List, Optional
 from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from app.core.security import decode_access_token
 from app.services.zerodb_client import zerodb_client
 from app.models.goal import GoalType
 from app.schemas.goal import GoalCreate, GoalUpdate, GoalResponse, GoalListResponse
@@ -26,22 +28,38 @@ from app.services.observability_service import observability_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/goals", tags=["goals"])
+security = HTTPBearer()
 
 
-# TODO: Replace with actual auth dependency from Sprint 1
-async def get_current_user() -> dict:
-    """Mock auth dependency - replace with Sprint 1 implementation."""
-    # For now, return first user from ZeroDB
-    users = await zerodb_client.query_rows(
-        table_name="users",
-        limit=1
-    )
-    if not users:
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+) -> dict:
+    """Extract user from JWT token and fetch from ZeroDB."""
+    token = credentials.credentials
+    payload = decode_access_token(token)
+
+    if not payload:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required"
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"}
         )
-    return users[0]
+
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token payload"
+        )
+
+    user = await zerodb_client.get_by_id(table_name="users", id=user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found"
+        )
+
+    return user
 
 
 @router.post(

@@ -55,9 +55,11 @@ class AuthService:
         user_data = {
             "id": user_id,
             "linkedin_id": linkedin_data.linkedin_id,
-            "name": linkedin_data.name,
+            "full_name": linkedin_data.name,  # Used by frontend
+            "first_name": linkedin_data.first_name,
+            "last_name": linkedin_data.last_name,
             "headline": linkedin_data.headline,
-            "profile_picture_url": linkedin_data.profile_photo_url,
+            "profile_photo_url": linkedin_data.profile_photo_url,
             "location": linkedin_data.location,
             "email": linkedin_data.email,
             "phone_number": None,

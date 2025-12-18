@@ -161,8 +161,17 @@ class PhoneVerificationService:
         if not expires_at_str:
             return False
 
-        # Parse ISO timestamp
-        expires_at = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00'))
+        # Parse ISO timestamp - remove timezone info for comparison with utcnow()
+        try:
+            # Handle various ISO formats
+            clean_str = expires_at_str.replace('Z', '').replace('+00:00', '')
+            # Remove microseconds timezone suffix if present
+            if '+' in clean_str:
+                clean_str = clean_str.split('+')[0]
+            expires_at = datetime.fromisoformat(clean_str)
+        except ValueError:
+            return False
+
         if expires_at < datetime.utcnow():
             return False
 

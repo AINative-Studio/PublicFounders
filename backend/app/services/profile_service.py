@@ -30,9 +30,47 @@ class ProfileService:
         profiles = await zerodb_client.query_rows(
             table_name="founder_profiles",
             filter={"user_id": str(user_id)},
-            limit=1
+            limit=1000
         )
         return profiles[0] if profiles else None
+
+    async def create_default_profile(
+        self,
+        user_id: uuid.UUID,
+        user: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Create a default founder profile for a new user
+
+        Args:
+            user_id: User UUID
+            user: User dictionary with name, etc.
+
+        Returns:
+            Created profile dictionary
+        """
+        now = datetime.utcnow().isoformat()
+        profile_id = str(uuid.uuid4())
+
+        profile_data = {
+            "id": profile_id,
+            "user_id": str(user_id),
+            "bio": "",
+            "current_focus": "",
+            "expertise_areas": [],
+            "interests": [],
+            "looking_for": [],
+            "autonomy_mode": "suggest",
+            "created_at": now,
+            "updated_at": now
+        }
+
+        await zerodb_client.insert_rows(
+            table_name="founder_profiles",
+            rows=[profile_data]
+        )
+
+        return profile_data
 
     async def update_profile(
         self,

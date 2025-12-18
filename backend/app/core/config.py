@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     # LinkedIn OAuth
     LINKEDIN_CLIENT_ID: Optional[str] = None
     LINKEDIN_CLIENT_SECRET: Optional[str] = None
-    LINKEDIN_REDIRECT_URI: str = "http://localhost:8000/api/v1/auth/linkedin/callback"
+    LINKEDIN_REDIRECT_URI: str = "http://localhost:9000/api/v1/auth/linkedin/callback"
     LINKEDIN_SCOPE: str = "openid profile email"
 
     # Twilio (Phone Verification)
@@ -69,7 +69,7 @@ class Settings(BaseSettings):
     EMBEDDING_DIMENSIONS: int = 384
 
     # CORS
-    CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:8000"]
+    CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:4000", "http://localhost:8000", "http://localhost:9000"]
 
     # Phone Verification Settings
     PHONE_VERIFICATION_CODE_LENGTH: int = 6

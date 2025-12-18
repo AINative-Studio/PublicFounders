@@ -20,7 +20,9 @@ router = APIRouter()
 
 
 @router.get("/linkedin/initiate")
-async def initiate_linkedin_oauth():
+async def initiate_linkedin_oauth(
+    redirect_uri: Optional[str] = Query(None, description="Frontend callback URL to redirect after auth")
+):
     """
     Initiate LinkedIn OAuth flow
 
@@ -32,13 +34,18 @@ async def initiate_linkedin_oauth():
             detail="LinkedIn OAuth not configured"
         )
 
+    # Use state parameter to pass frontend redirect URI
+    import base64
+    state = base64.urlsafe_b64encode((redirect_uri or "http://localhost:3000/auth/callback").encode()).decode()
+
     # Build LinkedIn authorization URL
     auth_url = (
         f"https://www.linkedin.com/oauth/v2/authorization?"
         f"response_type=code&"
         f"client_id={settings.LINKEDIN_CLIENT_ID}&"
         f"redirect_uri={settings.LINKEDIN_REDIRECT_URI}&"
-        f"scope={settings.LINKEDIN_SCOPE}"
+        f"scope={settings.LINKEDIN_SCOPE}&"
+        f"state={state}"
     )
 
     return RedirectResponse(url=auth_url)
@@ -46,18 +53,29 @@ async def initiate_linkedin_oauth():
 
 @router.get("/linkedin/callback")
 async def linkedin_oauth_callback(
-    code: str = Query(..., description="Authorization code from LinkedIn")
+    code: str = Query(..., description="Authorization code from LinkedIn"),
+    state: Optional[str] = Query(None, description="State parameter with frontend redirect URI")
 ):
     """
     LinkedIn OAuth callback handler
 
     Exchanges authorization code for access token and creates/logs in user
+    Redirects to frontend with token or error
     """
+    import base64
+    import urllib.parse
+
+    # Decode frontend redirect URI from state
+    frontend_redirect = "http://localhost:3000/auth/callback"
+    if state:
+        try:
+            frontend_redirect = base64.urlsafe_b64decode(state.encode()).decode()
+        except Exception:
+            pass  # Use default if decode fails
+
     if not settings.LINKEDIN_CLIENT_ID or not settings.LINKEDIN_CLIENT_SECRET:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="LinkedIn OAuth not configured"
-        )
+        error_url = f"{frontend_redirect}?error=config_error&error_description=LinkedIn+OAuth+not+configured"
+        return RedirectResponse(url=error_url)
 
     try:
         # Exchange code for access token
@@ -75,19 +93,15 @@ async def linkedin_oauth_callback(
             )
 
             if token_response.status_code != 200:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Failed to get access token from LinkedIn"
-                )
+                error_url = f"{frontend_redirect}?error=token_error&error_description=Failed+to+get+access+token+from+LinkedIn"
+                return RedirectResponse(url=error_url)
 
             token_data = token_response.json()
             access_token = token_data.get("access_token")
 
             if not access_token:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="No access token received from LinkedIn"
-                )
+                error_url = f"{frontend_redirect}?error=token_error&error_description=No+access+token+received"
+                return RedirectResponse(url=error_url)
 
             # Get user info from LinkedIn
             user_info_response = await client.get(
@@ -96,20 +110,32 @@ async def linkedin_oauth_callback(
             )
 
             if user_info_response.status_code != 200:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Failed to get user info from LinkedIn"
-                )
+                error_url = f"{frontend_redirect}?error=user_info_error&error_description=Failed+to+get+user+info"
+                return RedirectResponse(url=error_url)
 
             linkedin_user = user_info_response.json()
 
+            # Handle locale - LinkedIn returns it as an object {'country': 'US', 'language': 'en'}
+            locale_data = linkedin_user.get("locale")
+            location_str = None
+            if locale_data:
+                if isinstance(locale_data, dict):
+                    country = locale_data.get("country", "")
+                    language = locale_data.get("language", "")
+                    location_str = f"{country}" if country else None
+                elif isinstance(locale_data, str):
+                    location_str = locale_data
+
             # Map LinkedIn data to our schema
+            # LinkedIn userinfo provides: sub, name, given_name, family_name, picture, email, locale
             linkedin_data = LinkedInUserData(
                 linkedin_id=linkedin_user.get("sub"),
                 name=linkedin_user.get("name", ""),
-                headline=linkedin_user.get("headline"),
+                first_name=linkedin_user.get("given_name"),
+                last_name=linkedin_user.get("family_name"),
+                headline=linkedin_user.get("headline"),  # Note: Not available via userinfo endpoint
                 profile_photo_url=linkedin_user.get("picture"),
-                location=linkedin_user.get("locale"),
+                location=location_str,
                 email=linkedin_user.get("email")
             )
 
@@ -129,21 +155,21 @@ async def linkedin_oauth_callback(
                 expires_delta=timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
             )
 
-            return {
-                "access_token": jwt_token,
-                "token_type": "bearer",
-                "expires_in": settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60,  # seconds
-                "user": user,  # Already a dict from ZeroDB
-                "created": created
+            # Redirect to frontend with token
+            params = {
+                "token": jwt_token,
+                "created": str(created).lower(),
+                "user_id": user["id"],
+                "phone_verified": str(user.get("phone_verified", False)).lower()
             }
+            query_string = urllib.parse.urlencode(params)
+            success_url = f"{frontend_redirect}?{query_string}"
+            return RedirectResponse(url=success_url)
 
-    except HTTPException:
-        raise
     except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"OAuth flow failed: {str(e)}"
-        )
+        error_msg = urllib.parse.quote(str(e))
+        error_url = f"{frontend_redirect}?error=oauth_error&error_description={error_msg}"
+        return RedirectResponse(url=error_url)
 
 
 @router.post("/verify-phone", status_code=status.HTTP_200_OK)

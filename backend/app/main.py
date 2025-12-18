@@ -31,10 +31,15 @@ app = FastAPI(
     openapi_url="/api/openapi.json"
 )
 
-# Configure CORS
+# Configure CORS - explicit origins for local development
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:4000",
+        "http://localhost:8000",
+        "http://localhost:9000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

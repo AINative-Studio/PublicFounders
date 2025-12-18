@@ -15,7 +15,7 @@ Architecture:
 """
 import logging
 from typing import Dict, Any, Optional, List
-from uuid import UUID
+from uuid import UUID, uuid4
 from datetime import datetime
 import httpx
 from app.core.config import settings
@@ -43,7 +43,7 @@ class RLHFService:
         """Initialize RLHF service with ZeroDB configuration."""
         self.project_id = settings.ZERODB_PROJECT_ID
         self.api_key = settings.ZERODB_API_KEY
-        self.base_url = "https://api.zerodb.ai/v1"
+        self.base_url = f"https://api.ainative.studio/v1/public/{self.project_id}"
 
         # Agent identifiers for different matching contexts
         self.GOAL_MATCHER_AGENT = "goal_matcher"
@@ -120,11 +120,12 @@ class RLHFService:
                 return interaction_id
 
         except httpx.HTTPError as e:
-            logger.error(f"Failed to track goal match: {e}")
-            raise RLHFServiceError(f"Failed to track goal match: {e}")
+            # RLHF tracking is optional - log error but don't crash
+            logger.warning(f"RLHF tracking unavailable (goal match): {e}")
+            return f"mock-{uuid4()}"  # Return mock ID
         except Exception as e:
-            logger.error(f"Unexpected error tracking goal match: {e}")
-            raise RLHFServiceError(f"Unexpected error: {e}")
+            logger.warning(f"RLHF tracking error (goal match): {e}")
+            return f"mock-{uuid4()}"  # Return mock ID
 
     async def track_ask_match(
         self,
@@ -189,11 +190,11 @@ class RLHFService:
                 return interaction_id
 
         except httpx.HTTPError as e:
-            logger.error(f"Failed to track ask match: {e}")
-            raise RLHFServiceError(f"Failed to track ask match: {e}")
+            logger.warning(f"RLHF tracking unavailable (ask match): {e}")
+            return f"mock-{uuid4()}"
         except Exception as e:
-            logger.error(f"Unexpected error tracking ask match: {e}")
-            raise RLHFServiceError(f"Unexpected error: {e}")
+            logger.warning(f"RLHF tracking error (ask match): {e}")
+            return f"mock-{uuid4()}"
 
     async def track_discovery_interaction(
         self,
@@ -258,11 +259,11 @@ class RLHFService:
                 return interaction_id
 
         except httpx.HTTPError as e:
-            logger.error(f"Failed to track discovery interaction: {e}")
-            raise RLHFServiceError(f"Failed to track discovery: {e}")
+            logger.warning(f"RLHF tracking unavailable (discovery): {e}")
+            return f"mock-{uuid4()}"
         except Exception as e:
-            logger.error(f"Unexpected error tracking discovery: {e}")
-            raise RLHFServiceError(f"Unexpected error: {e}")
+            logger.warning(f"RLHF tracking error (discovery): {e}")
+            return f"mock-{uuid4()}"
 
     async def track_introduction_outcome(
         self,
@@ -325,11 +326,11 @@ class RLHFService:
                 return interaction_id
 
         except httpx.HTTPError as e:
-            logger.error(f"Failed to track introduction outcome: {e}")
-            raise RLHFServiceError(f"Failed to track introduction: {e}")
+            logger.warning(f"RLHF tracking unavailable (intro outcome): {e}")
+            return f"mock-{uuid4()}"
         except Exception as e:
-            logger.error(f"Unexpected error tracking introduction: {e}")
-            raise RLHFServiceError(f"Unexpected error: {e}")
+            logger.warning(f"RLHF tracking error (intro outcome): {e}")
+            return f"mock-{uuid4()}"
 
     async def provide_agent_feedback(
         self,
@@ -384,11 +385,11 @@ class RLHFService:
                 return feedback_id
 
         except httpx.HTTPError as e:
-            logger.error(f"Failed to provide agent feedback: {e}")
-            raise RLHFServiceError(f"Failed to provide feedback: {e}")
+            logger.warning(f"RLHF tracking unavailable (feedback): {e}")
+            return f"mock-{uuid4()}"
         except Exception as e:
-            logger.error(f"Unexpected error providing feedback: {e}")
-            raise RLHFServiceError(f"Unexpected error: {e}")
+            logger.warning(f"RLHF tracking error (feedback): {e}")
+            return f"mock-{uuid4()}"
 
     async def get_rlhf_insights(self, time_range: str = "day") -> Dict[str, Any]:
         """
@@ -609,8 +610,8 @@ class RLHFService:
                 return interaction_id
 
         except Exception as e:
-            logger.error(f"Failed to track introduction with context: {e}")
-            raise RLHFServiceError(f"Failed to track introduction: {e}")
+            logger.warning(f"RLHF tracking error (intro context): {e}")
+            return f"mock-{uuid4()}"
 
     def _build_introduction_prompt(
         self,

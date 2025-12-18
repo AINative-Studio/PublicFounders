@@ -62,7 +62,7 @@ class EmbeddingService:
         self.ainative_base_url = settings.AINATIVE_API_BASE_URL
         self.zerodb_project_id = settings.ZERODB_PROJECT_ID
         self.zerodb_api_key = settings.ZERODB_API_KEY
-        self.base_url = "https://api.zerodb.ai/v1"
+        self.base_url = f"https://api.ainative.studio/v1/public/{self.zerodb_project_id}"
 
     async def generate_embedding(self, text: str) -> List[float]:
         """

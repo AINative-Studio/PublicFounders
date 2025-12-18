@@ -1,8 +1,8 @@
 """
-ZeroDB Client - NoSQL Table Operations via Direct API
+ZeroDB Client - NoSQL Table Operations via AINative API
 
 This client handles all NoSQL table CRUD operations for PublicFounders.
-Replaces PostgreSQL/SQLAlchemy for relational data storage.
+Uses the AINative ZeroDB API: https://api.ainative.studio/v1/public/{project_id}/...
 
 Tables:
 - users: User accounts and authentication
@@ -26,25 +26,64 @@ logger = logging.getLogger(__name__)
 
 class ZeroDBClient:
     """
-    Client for ZeroDB NoSQL table operations via direct API calls.
+    Client for ZeroDB NoSQL table operations via AINative API.
 
-    Uses ZeroDB REST API for all database operations.
+    API Documentation: https://api.ainative.studio/docs
     """
 
     def __init__(self):
         """Initialize ZeroDB client with API credentials."""
         self.project_id = settings.ZERODB_PROJECT_ID
         self.api_key = settings.ZERODB_API_KEY
-        self.base_url = "https://api.zerodb.ai/v1"
+        self.base_url = f"https://api.ainative.studio/v1/public/{self.project_id}"
         logger.info(f"ZeroDB Client initialized for project: {self.project_id}")
 
     def _get_headers(self) -> Dict[str, str]:
         """Get API request headers."""
         return {
-            "X-Project-ID": self.project_id,
             "X-API-Key": self.api_key,
             "Content-Type": "application/json"
         }
+
+    async def create_table(
+        self,
+        table_name: str,
+        description: str = "",
+        schema: Optional[Dict[str, str]] = None
+    ) -> Dict[str, Any]:
+        """
+        Create a new table in ZeroDB.
+
+        Args:
+            table_name: Name of the table
+            description: Table description
+            schema: Optional schema definition
+
+        Returns:
+            Result dictionary with table info
+        """
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.base_url}/database/tables",
+                    headers=self._get_headers(),
+                    json={
+                        "name": table_name,
+                        "description": description,
+                        "schema": schema or {}
+                    },
+                    timeout=30.0
+                )
+                response.raise_for_status()
+                result = response.json()
+                logger.info(f"Created table: {table_name}")
+                return result
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Error creating table {table_name}: {e.response.text}")
+            raise
+        except Exception as e:
+            logger.error(f"Error creating table {table_name}: {e}")
+            raise
 
     async def insert_rows(
         self,
@@ -62,32 +101,31 @@ class ZeroDBClient:
 
         Returns:
             Result dictionary with status and optional IDs
-
-        Example:
-            await client.insert_rows("users", [{
-                "id": str(uuid4()),
-                "email": "founder@example.com",
-                "name": "Jane Founder",
-                "created_at": datetime.utcnow().isoformat()
-            }])
         """
+        results = []
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.base_url}/tables/{table_name}/rows",
-                    headers=self._get_headers(),
-                    json={"rows": rows, "return_ids": return_ids},
-                    timeout=30.0
-                )
-                response.raise_for_status()
-                result = response.json()
+                # Insert rows one at a time using row_data parameter
+                for row in rows:
+                    response = await client.post(
+                        f"{self.base_url}/database/tables/{table_name}/rows",
+                        headers=self._get_headers(),
+                        json={"row_data": row},
+                        timeout=30.0
+                    )
+                    response.raise_for_status()
+                    results.append(response.json())
+
                 logger.info(f"Inserted {len(rows)} rows into {table_name}")
-                return result
+                return {"success": True, "inserted": len(rows), "results": results}
         except httpx.HTTPStatusError as e:
-            logger.error(f"Error inserting rows into {table_name}: {e.response.text}")
+            error_text = e.response.text
+            logger.error(f"Error inserting rows into {table_name}: {error_text}")
+            print(f"Error inserting rows: {error_text}")
             raise
         except Exception as e:
             logger.error(f"Error inserting rows into {table_name}: {e}")
+            print(f"Error inserting rows: {e}")
             raise
 
     async def query_rows(
@@ -112,39 +150,65 @@ class ZeroDBClient:
 
         Returns:
             List of matching rows
-
-        Example:
-            users = await client.query_rows(
-                table_name="users",
-                filter={"linkedin_id": "abc123"},
-                limit=1
-            )
         """
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.base_url}/tables/{table_name}/query",
+                # Build query parameters - ZeroDB API has max limit of 1000
+                capped_limit = min(limit, 1000)
+                params = {"limit": capped_limit, "offset": offset}
+
+                response = await client.get(
+                    f"{self.base_url}/database/tables/{table_name}/rows",
                     headers=self._get_headers(),
-                    json={
-                        "filter": filter or {},
-                        "limit": limit,
-                        "offset": offset,
-                        "projection": projection,
-                        "sort": sort
-                    },
+                    params=params,
                     timeout=30.0
                 )
                 response.raise_for_status()
                 result = response.json()
-                rows = result.get("rows", [])
+
+                # Handle different response formats
+                if isinstance(result, list):
+                    rows = result
+                elif isinstance(result, dict):
+                    # ZeroDB API returns data in 'data' array with row_data nested inside
+                    raw_rows = result.get("data", result.get("rows", result.get("items", [])))
+                    # Extract row_data from each item, preserving row_id for updates
+                    rows = []
+                    for item in raw_rows:
+                        if isinstance(item, dict) and "row_data" in item:
+                            row_data = item["row_data"].copy()
+                            # Preserve row_id as _row_id for update/delete operations
+                            row_data["_row_id"] = item.get("row_id")
+                            rows.append(row_data)
+                        else:
+                            rows.append(item)
+                else:
+                    rows = []
+
+                # Apply client-side filter if provided
+                if filter:
+                    filtered_rows = []
+                    for row in rows:
+                        match = True
+                        for key, value in filter.items():
+                            if row.get(key) != value:
+                                match = False
+                                break
+                        if match:
+                            filtered_rows.append(row)
+                    rows = filtered_rows
+
                 logger.debug(f"Queried {len(rows)} rows from {table_name}")
                 return rows
         except httpx.HTTPStatusError as e:
-            logger.error(f"Error querying {table_name}: {e.response.text}")
-            raise
+            error_text = e.response.text
+            logger.error(f"Error querying {table_name}: {error_text}")
+            print(f"Error querying {table_name}: {error_text}")
+            return []
         except Exception as e:
             logger.error(f"Error querying {table_name}: {e}")
-            raise
+            print(f"Error querying {table_name}: {e}")
+            return []
 
     async def update_rows(
         self,
@@ -164,30 +228,38 @@ class ZeroDBClient:
 
         Returns:
             Result dictionary with update status
-
-        Example:
-            await client.update_rows(
-                table_name="users",
-                filter={"id": user_id},
-                update={"$set": {"name": "Updated Name", "updated_at": datetime.utcnow().isoformat()}}
-            )
         """
         try:
+            # First find the row(s) to update
+            rows = await self.query_rows(table_name=table_name, filter=filter)
+
+            if not rows and not upsert:
+                return {"matched": 0, "modified": 0}
+
             async with httpx.AsyncClient() as client:
-                response = await client.put(
-                    f"{self.base_url}/tables/{table_name}/rows",
-                    headers=self._get_headers(),
-                    json={
-                        "filter": filter,
-                        "update": update,
-                        "upsert": upsert
-                    },
-                    timeout=30.0
-                )
-                response.raise_for_status()
-                result = response.json()
-                logger.info(f"Updated rows in {table_name} with filter: {filter}")
-                return result
+                modified = 0
+                update_data = update.get("$set", update)
+
+                for row in rows:
+                    # Use _row_id (ZeroDB's row identifier) for the API call
+                    row_id = row.get("_row_id")
+                    if row_id:
+                        # Merge existing row data with updates
+                        merged_data = {k: v for k, v in row.items() if k != "_row_id"}
+                        merged_data.update(update_data)
+
+                        # Update the row
+                        response = await client.put(
+                            f"{self.base_url}/database/tables/{table_name}/rows/{row_id}",
+                            headers=self._get_headers(),
+                            json={"row_data": merged_data},
+                            timeout=30.0
+                        )
+                        if response.status_code == 200:
+                            modified += 1
+
+                logger.info(f"Updated {modified} rows in {table_name}")
+                return {"matched": len(rows), "modified": modified}
         except httpx.HTTPStatusError as e:
             logger.error(f"Error updating {table_name}: {e.response.text}")
             raise
@@ -211,29 +283,30 @@ class ZeroDBClient:
 
         Returns:
             Result dictionary with deletion status
-
-        Example:
-            await client.delete_rows(
-                table_name="users",
-                filter={"id": user_id}
-            )
         """
         try:
+            # First find the row(s) to delete
+            rows = await self.query_rows(table_name=table_name, filter=filter)
+
+            if limit > 0:
+                rows = rows[:limit]
+
             async with httpx.AsyncClient() as client:
-                response = await client.request(
-                    "DELETE",
-                    f"{self.base_url}/tables/{table_name}/rows",
-                    headers=self._get_headers(),
-                    json={
-                        "filter": filter,
-                        "limit": limit
-                    },
-                    timeout=30.0
-                )
-                response.raise_for_status()
-                result = response.json()
-                logger.info(f"Deleted rows from {table_name} with filter: {filter}")
-                return result
+                deleted = 0
+                for row in rows:
+                    # Use _row_id (ZeroDB's row identifier) for the API call
+                    row_id = row.get("_row_id")
+                    if row_id:
+                        response = await client.delete(
+                            f"{self.base_url}/database/tables/{table_name}/rows/{row_id}",
+                            headers=self._get_headers(),
+                            timeout=30.0
+                        )
+                        if response.status_code in [200, 204]:
+                            deleted += 1
+
+                logger.info(f"Deleted {deleted} rows from {table_name}")
+                return {"deleted": deleted}
         except httpx.HTTPStatusError as e:
             logger.error(f"Error deleting from {table_name}: {e.response.text}")
             raise
@@ -256,10 +329,12 @@ class ZeroDBClient:
         Returns:
             Row dictionary or None if not found
         """
+        # Fetch all rows since ZeroDB doesn't support server-side filtering
+        # Then apply client-side filter to find the matching ID
         rows = await self.query_rows(
             table_name=table_name,
             filter={"id": id},
-            limit=1
+            limit=1000  # Fetch enough to find the match
         )
         return rows[0] if rows else None
 
@@ -280,10 +355,12 @@ class ZeroDBClient:
         Returns:
             Row dictionary or None if not found
         """
+        # Fetch all rows since ZeroDB doesn't support server-side filtering
+        # Then apply client-side filter to find the matching field
         rows = await self.query_rows(
             table_name=table_name,
             filter={field: value},
-            limit=1
+            limit=1000  # Fetch enough to find the match
         )
         return rows[0] if rows else None
 

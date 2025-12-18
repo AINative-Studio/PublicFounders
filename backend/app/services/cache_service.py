@@ -35,7 +35,51 @@ class CacheService:
 
     def __init__(self):
         """Initialize cache service."""
+        self._cache: Dict[str, Any] = {}  # In-memory cache for generic get/set
         logger.info("Cache service initialized with ZeroDB NoSQL backend")
+
+    async def get(self, key: str) -> Optional[Any]:
+        """
+        Get a value from the cache by key.
+
+        Args:
+            key: Cache key
+
+        Returns:
+            Cached value or None if not found
+        """
+        return self._cache.get(key)
+
+    async def set(self, key: str, value: Any, ttl: int = None, ttl_seconds: int = None) -> bool:
+        """
+        Set a value in the cache.
+
+        Args:
+            key: Cache key
+            value: Value to cache
+            ttl: Time to live in seconds (alias for ttl_seconds)
+            ttl_seconds: Time to live (not enforced in this simple implementation)
+
+        Returns:
+            True if successful
+        """
+        self._cache[key] = value
+        return True
+
+    async def delete(self, key: str) -> bool:
+        """
+        Delete a key from the cache.
+
+        Args:
+            key: Cache key
+
+        Returns:
+            True if deleted, False if not found
+        """
+        if key in self._cache:
+            del self._cache[key]
+            return True
+        return False
 
     @staticmethod
     def generate_cache_key(user_id: UUID, goal_descriptions: List[str]) -> str:

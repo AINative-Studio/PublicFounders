@@ -11,6 +11,8 @@ class LinkedInUserData(BaseModel):
     """LinkedIn OAuth user data"""
     linkedin_id: str = Field(..., description="LinkedIn user ID")
     name: str = Field(..., min_length=1, max_length=255, description="Full name")
+    first_name: Optional[str] = Field(None, max_length=100, description="First name")
+    last_name: Optional[str] = Field(None, max_length=100, description="Last name")
     headline: Optional[str] = Field(None, max_length=500, description="Professional headline")
     profile_photo_url: Optional[str] = Field(None, description="Profile photo URL")
     location: Optional[str] = Field(None, max_length=255, description="Location")

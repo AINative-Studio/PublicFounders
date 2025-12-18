@@ -21,7 +21,9 @@ from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
+from app.core.security import decode_access_token
 from app.services.introduction_service import (
     introduction_service,
     IntroductionServiceError,
@@ -53,22 +55,41 @@ from app.services.outcome_service import outcome_service, OutcomeServiceError
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/introductions", tags=["introductions"])
+security = HTTPBearer()
 
 
-# TODO: Replace with actual auth dependency from Sprint 1
-async def get_current_user() -> dict:
-    """Mock auth dependency - replace with Sprint 1 implementation."""
-    # For now, return first user from ZeroDB
-    users = await zerodb_client.query_rows(
-        table_name="users",
-        limit=1
-    )
-    if not users:
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+) -> dict:
+    """
+    Extract user from JWT token and fetch user data from ZeroDB.
+    """
+    token = credentials.credentials
+    payload = decode_access_token(token)
+
+    if not payload:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required"
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"}
         )
-    return users[0]
+
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token payload"
+        )
+
+    # Fetch user from ZeroDB
+    user = await zerodb_client.get_by_id(table_name="users", id=user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found"
+        )
+
+    return user
 
 
 @router.get(
@@ -294,8 +315,9 @@ async def request_introduction(
     """
 )
 async def get_received_introductions(
-    status: Optional[str] = Query(
+    intro_status: Optional[str] = Query(
         None,
+        alias="status",
         pattern="^(pending|accepted|declined|completed|expired)$",
         description="Filter by introduction status"
     ),
@@ -312,7 +334,7 @@ async def get_received_introductions(
     try:
         introductions = await introduction_service.get_received_introductions(
             user_id=UUID(current_user["id"]),
-            status=status,
+            status=intro_status,
             limit=limit,
             offset=offset
         )
@@ -342,8 +364,9 @@ async def get_received_introductions(
     """
 )
 async def get_sent_introductions(
-    status: Optional[str] = Query(
+    intro_status: Optional[str] = Query(
         None,
+        alias="status",
         pattern="^(pending|accepted|declined|completed|expired)$",
         description="Filter by introduction status"
     ),
@@ -360,7 +383,7 @@ async def get_sent_introductions(
     try:
         introductions = await introduction_service.get_sent_introductions(
             user_id=UUID(current_user["id"]),
-            status=status,
+            status=intro_status,
             limit=limit,
             offset=offset
         )
