@@ -2,6 +2,7 @@
 Authentication API Endpoints
 LinkedIn OAuth, JWT tokens, and phone verification
 """
+import logging
 import uuid
 from typing import Optional
 from datetime import timedelta
@@ -16,11 +17,15 @@ from app.services.phone_verification_service import PhoneVerificationService
 from app.schemas.auth import Token, PhoneVerificationRequest, PhoneVerificationConfirm
 from app.schemas.user import LinkedInUserData, UserResponse
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 
 @router.get("/linkedin/initiate")
-async def initiate_linkedin_oauth():
+async def initiate_linkedin_oauth(
+    redirect_uri: Optional[str] = Query(None, description="Frontend callback URL to redirect after auth")
+):
     """
     Initiate LinkedIn OAuth flow
 
@@ -32,13 +37,18 @@ async def initiate_linkedin_oauth():
             detail="LinkedIn OAuth not configured"
         )
 
+    # Use state parameter to pass frontend redirect URI
+    import base64
+    state = base64.urlsafe_b64encode((redirect_uri or "http://localhost:4000/auth/callback").encode()).decode()
+
     # Build LinkedIn authorization URL
     auth_url = (
         f"https://www.linkedin.com/oauth/v2/authorization?"
         f"response_type=code&"
         f"client_id={settings.LINKEDIN_CLIENT_ID}&"
         f"redirect_uri={settings.LINKEDIN_REDIRECT_URI}&"
-        f"scope={settings.LINKEDIN_SCOPE}"
+        f"scope={settings.LINKEDIN_SCOPE}&"
+        f"state={state}"
     )
 
     return RedirectResponse(url=auth_url)
@@ -47,25 +57,34 @@ async def initiate_linkedin_oauth():
 @router.get("/linkedin/callback")
 async def linkedin_oauth_callback(
     code: str = Query(..., description="Authorization code from LinkedIn"),
-    state: Optional[str] = Query(None, description="Frontend origin URL for redirect")
+    state: Optional[str] = Query(None, description="State parameter with frontend redirect URI")
 ):
     """
     LinkedIn OAuth callback handler
 
     Exchanges authorization code for access token and creates/logs in user
-    Redirects to frontend with JWT token in URL
+    Redirects to frontend with token or error
     """
+    import base64
+    import urllib.parse
+
     logger.info(f"=== LinkedIn OAuth Callback Started ===")
     logger.info(f"Code received: {code[:15]}... (length: {len(code)})")
     logger.info(f"State parameter: {state}")
     logger.info(f"Redirect URI configured: {settings.LINKEDIN_REDIRECT_URI}")
 
+    # Decode frontend redirect URI from state
+    frontend_redirect = "http://localhost:4000/auth/callback"
+    if state:
+        try:
+            frontend_redirect = base64.urlsafe_b64decode(state.encode()).decode()
+        except Exception:
+            pass  # Use default if decode fails
+
     if not settings.LINKEDIN_CLIENT_ID or not settings.LINKEDIN_CLIENT_SECRET:
         logger.error("LinkedIn OAuth credentials not configured")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="LinkedIn OAuth not configured"
-        )
+        error_url = f"{frontend_redirect}?error=config_error&error_description=LinkedIn+OAuth+not+configured"
+        return RedirectResponse(url=error_url)
 
     try:
         # Exchange code for access token
@@ -85,20 +104,16 @@ async def linkedin_oauth_callback(
             if token_response.status_code != 200:
                 logger.error(f"LinkedIn token exchange failed: {token_response.status_code}")
                 logger.error(f"Response: {token_response.text}")
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Failed to get access token from LinkedIn"
-                )
+                error_url = f"{frontend_redirect}?error=token_error&error_description=Failed+to+get+access+token+from+LinkedIn"
+                return RedirectResponse(url=error_url)
 
             token_data = token_response.json()
             access_token = token_data.get("access_token")
             logger.info(f"Successfully received access token from LinkedIn")
 
             if not access_token:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="No access token received from LinkedIn"
-                )
+                error_url = f"{frontend_redirect}?error=token_error&error_description=No+access+token+received"
+                return RedirectResponse(url=error_url)
 
             # Get user info from LinkedIn
             logger.info("Fetching user info from LinkedIn API")
@@ -110,31 +125,30 @@ async def linkedin_oauth_callback(
             if user_info_response.status_code != 200:
                 logger.error(f"LinkedIn user info fetch failed: {user_info_response.status_code}")
                 logger.error(f"Response: {user_info_response.text}")
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Failed to get user info from LinkedIn"
-                )
+                error_url = f"{frontend_redirect}?error=user_info_error&error_description=Failed+to+get+user+info"
+                return RedirectResponse(url=error_url)
 
             linkedin_user = user_info_response.json()
             logger.info(f"LinkedIn user data received: {linkedin_user.get('sub', 'N/A')}, {linkedin_user.get('email', 'N/A')}")
 
-            # Map LinkedIn data to our schema
-            # Handle location - LinkedIn returns dict like {'country': 'US', 'language': 'en'}
-            location_data = linkedin_user.get("locale")
+            # Handle locale - LinkedIn returns it as an object {'country': 'US', 'language': 'en'}
+            locale_data = linkedin_user.get("locale")
             location_str = None
-            if location_data:
-                if isinstance(location_data, dict):
-                    # Extract country and language from dict
-                    country = location_data.get("country", "")
-                    language = location_data.get("language", "")
-                    location_str = f"{country}_{language}" if country and language else country or language
-                else:
-                    location_str = str(location_data)
+            if locale_data:
+                if isinstance(locale_data, dict):
+                    country = locale_data.get("country", "")
+                    location_str = f"{country}" if country else None
+                elif isinstance(locale_data, str):
+                    location_str = locale_data
 
+            # Map LinkedIn data to our schema
+            # LinkedIn userinfo provides: sub, name, given_name, family_name, picture, email, locale
             linkedin_data = LinkedInUserData(
                 linkedin_id=linkedin_user.get("sub"),
                 name=linkedin_user.get("name", ""),
-                headline=linkedin_user.get("headline"),
+                first_name=linkedin_user.get("given_name"),
+                last_name=linkedin_user.get("family_name"),
+                headline=linkedin_user.get("headline"),  # Note: Not available via userinfo endpoint
                 profile_photo_url=linkedin_user.get("picture"),
                 location=location_str,
                 email=linkedin_user.get("email")
@@ -159,32 +173,23 @@ async def linkedin_oauth_callback(
             )
             logger.info(f"JWT token created successfully")
 
-            # If state parameter provided (frontend origin), redirect to frontend
-            if state:
-                # Redirect to frontend with token and user info
-                frontend_callback_url = f"{state}/auth/callback?token={jwt_token}&created={str(created).lower()}"
-                logger.info(f"Redirecting to frontend: {frontend_callback_url[:50]}...")
-                return RedirectResponse(url=frontend_callback_url)
-
-            # Otherwise return JSON (for API clients)
-            return {
-                "access_token": jwt_token,
-                "token_type": "bearer",
-                "expires_in": settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60,  # seconds
-                "user": user,  # Already a dict from ZeroDB
-                "created": created
+            # Redirect to frontend with token
+            params = {
+                "token": jwt_token,
+                "created": str(created).lower(),
+                "user_id": user["id"],
+                "phone_verified": str(user.get("phone_verified", False)).lower()
             }
+            query_string = urllib.parse.urlencode(params)
+            success_url = f"{frontend_redirect}?{query_string}"
+            return RedirectResponse(url=success_url)
 
-    except HTTPException as e:
-        logger.error(f"HTTP Exception in OAuth flow: {e.status_code} - {e.detail}")
-        raise
     except Exception as e:
         logger.error(f"Unexpected error in OAuth flow: {type(e).__name__}: {str(e)}")
         logger.exception("Full traceback:")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"OAuth flow failed: {str(e)}"
-        )
+        error_msg = urllib.parse.quote(str(e))
+        error_url = f"{frontend_redirect}?error=oauth_error&error_description={error_msg}"
+        return RedirectResponse(url=error_url)
 
 
 @router.post("/verify-phone", status_code=status.HTTP_200_OK)

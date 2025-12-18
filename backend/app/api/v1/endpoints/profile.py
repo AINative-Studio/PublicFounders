@@ -72,7 +72,7 @@ async def get_my_profile(
     """
     Get current user's profile
 
-    Returns user data and founder profile
+    Returns user data and founder profile (creates default profile if none exists)
     """
     logger.info(f"=== /profile/me endpoint called ===")
     logger.info(f"User ID from token: {current_user_id}")
@@ -91,28 +91,30 @@ async def get_my_profile(
         )
     logger.info(f"User found: {user.get('email', 'N/A')}")
 
-    # Get profile
+    # Get or create profile
     logger.info(f"Fetching profile for user ID: {current_user_id}")
     profile = await profile_service.get_profile(current_user_id)
     if not profile:
-        logger.error(f"Profile not found for user: {current_user_id}")
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Profile not found"
-        )
-    logger.info(f"Profile found successfully")
+        # Create a default profile for new users
+        logger.info(f"Creating default profile for user: {current_user_id}")
+        profile = await profile_service.create_default_profile(current_user_id, user)
+    logger.info(f"Profile found/created successfully")
 
-    try:
-        response = {
-            "user": UserResponse.model_validate(user),
-            "profile": FounderProfileResponse.model_validate(profile)
-        }
-        logger.info(f"Profile response prepared successfully")
-        return response
-    except Exception as e:
-        logger.error(f"Error validating response models: {type(e).__name__}: {str(e)}")
-        logger.exception("Full traceback:")
-        raise
+    # Return user data (handle both dict and ORM object)
+    if isinstance(user, dict):
+        user_response = user
+    else:
+        user_response = UserResponse.from_orm(user).dict()
+
+    if isinstance(profile, dict):
+        profile_response = profile
+    else:
+        profile_response = FounderProfileResponse.from_orm(profile).dict()
+
+    return {
+        "user": user_response,
+        "profile": profile_response
+    }
 
 
 @router.put("/me", response_model=FounderProfileResponse)
@@ -229,16 +231,28 @@ async def get_user_profile(
             detail="Profile not found"
         )
 
-    # Check visibility
-    if not profile.public_visibility:
+    # Check visibility (handle both dict and ORM object)
+    public_visibility = profile.get("public_visibility") if isinstance(profile, dict) else profile.public_visibility
+    if not public_visibility:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="This profile is private"
         )
 
+    # Return response (handle both dict and ORM object)
+    if isinstance(user, dict):
+        user_response = user
+    else:
+        user_response = UserResponse.from_orm(user).dict()
+
+    if isinstance(profile, dict):
+        profile_response = profile
+    else:
+        profile_response = FounderProfileResponse.from_orm(profile).dict()
+
     return {
-        "user": UserResponse.model_validate(user),
-        "profile": FounderProfileResponse.model_validate(profile)
+        "user": user_response,
+        "profile": profile_response
     }
 
 
@@ -266,11 +280,24 @@ async def list_public_profiles(
     result = []
 
     for profile in profiles:
-        user = await auth_service.get_user_by_id(profile.user_id)
+        # Handle both dict and ORM object
+        user_id = profile.get("user_id") if isinstance(profile, dict) else profile.user_id
+        user = await auth_service.get_user_by_id(user_id)
         if user:
+            # Handle both dict and ORM object
+            if isinstance(user, dict):
+                user_response = user
+            else:
+                user_response = UserResponse.from_orm(user).dict()
+
+            if isinstance(profile, dict):
+                profile_response = profile
+            else:
+                profile_response = FounderProfileResponse.from_orm(profile).dict()
+
             result.append({
-                "user": UserResponse.from_orm(user),
-                "profile": FounderProfileResponse.from_orm(profile)
+                "user": user_response,
+                "profile": profile_response
             })
 
     return result

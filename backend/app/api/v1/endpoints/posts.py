@@ -19,7 +19,8 @@ from datetime import datetime
 from typing import Optional, List
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status, BackgroundTasks
-from app.models.user import User
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from app.core.security import decode_access_token
 from app.models.post import PostType
 from app.schemas.post import (
     PostCreate,
@@ -39,26 +40,37 @@ from app.services.observability_service import observability_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/posts", tags=["posts"])
+security = HTTPBearer()
 
 
-# TODO: Replace with actual auth dependency from Sprint 1
-async def get_current_user() -> User:
-    """Mock auth dependency - replace with Sprint 1 implementation."""
-    users = await zerodb_client.query_rows(
-        table_name="users",
-        limit=1
-    )
-    if not users:
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+) -> dict:
+    """Extract user from JWT token and fetch from ZeroDB."""
+    token = credentials.credentials
+    payload = decode_access_token(token)
+
+    if not payload:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required"
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"}
         )
-    # Convert dict to User object for compatibility
-    user_data = users[0]
-    user = User()
-    user.id = UUID(user_data["id"])
-    user.name = user_data.get("name")
-    user.email = user_data.get("email")
+
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token payload"
+        )
+
+    user = await zerodb_client.get_by_id(table_name="users", id=user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found"
+        )
+
     return user
 
 
@@ -134,7 +146,7 @@ async def create_post_embedding_async(post_id: UUID, user_id: UUID, post_type: s
 async def create_post(
     post_data: PostCreate,
     background_tasks: BackgroundTasks,
-    current_user: User = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ) -> PostResponse:
     """
     Create a new build-in-public post.
@@ -155,7 +167,7 @@ async def create_post(
         # Block inappropriate content
         if not safety_check.is_safe:
             logger.warning(
-                f"Post creation blocked for user {current_user.id}: "
+                f"Post creation blocked for user {current_user['id']}: "
                 f"flags {safety_check.content_flags}"
             )
             raise HTTPException(
@@ -166,7 +178,7 @@ async def create_post(
         # Warn about PII (log but don't block)
         if safety_check.contains_pii:
             logger.warning(
-                f"Post for user {current_user.id} contains PII: {safety_check.pii_types}"
+                f"Post for user {current_user['id']} contains PII: {safety_check.pii_types}"
             )
 
     except HTTPException:
@@ -181,7 +193,7 @@ async def create_post(
 
     post_data_dict = {
         "id": str(post_id),
-        "user_id": str(current_user.id),
+        "user_id": str(current_user["id"]),
         "type": post_data.type.value,
         "content": post_data.content,
         "is_cross_posted": post_data.is_cross_posted,
@@ -202,7 +214,7 @@ async def create_post(
     background_tasks.add_task(
         create_post_embedding_async,
         post_id=post_id,
-        user_id=current_user.id,
+        user_id=current_user["id"],
         post_type=post_data.type.value,
         content=post_data.content
     )
@@ -228,7 +240,7 @@ async def list_posts(
     page_size: int = Query(20, ge=1, le=100, description="Items per page"),
     user_id: Optional[UUID] = Query(None, description="Filter by user"),
     post_type: Optional[PostType] = Query(None, description="Filter by type"),
-    current_user: User = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ) -> PostListResponse:
     """
     List posts in chronological order (newest first).
@@ -278,7 +290,7 @@ async def list_posts(
 )
 async def discover_posts(
     discovery_params: PostDiscoveryRequest = Depends(),
-    current_user: User = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ) -> PostDiscoveryResponse:
     """
     Discover posts semantically relevant to user's goals.
@@ -293,7 +305,7 @@ async def discover_posts(
     goals = await zerodb_client.query_rows(
         table_name="goals",
         filter={
-            "user_id": str(current_user.id),
+            "user_id": str(current_user["id"]),
             "is_active": True
         }
     )
@@ -311,16 +323,16 @@ async def discover_posts(
 
     # CACHE LOOKUP: Check if we have cached results
     cached_results = await cache_service.get_cached_discovery(
-        user_id=current_user.id,
+        user_id=current_user["id"],
         goal_descriptions=goal_descriptions
     )
 
     if cached_results:
-        logger.info(f"Cache HIT for user {current_user.id} discovery")
+        logger.info(f"Cache HIT for user {current_user['id']} discovery")
         # Return cached results directly
         return PostDiscoveryResponse(**cached_results)
 
-    logger.info(f"Cache MISS for user {current_user.id} discovery - performing semantic search")
+    logger.info(f"Cache MISS for user {current_user['id']} discovery - performing semantic search")
 
     try:
         # Track discovery start time for observability
@@ -385,7 +397,7 @@ async def discover_posts(
 
         # CACHE STORAGE: Store results for future requests
         await cache_service.cache_discovery_results(
-            user_id=current_user.id,
+            user_id=current_user["id"],
             goal_descriptions=goal_descriptions,
             results=response_data.model_dump(),
             ttl_seconds=300  # 5 minutes
@@ -394,7 +406,7 @@ async def discover_posts(
         # Track RLHF interaction for discovery learning (no clicks yet)
         try:
             await rlhf_service.track_discovery_interaction(
-                user_id=current_user.id,
+                user_id=current_user["id"],
                 user_goals=goal_descriptions,
                 shown_posts=post_ids,
                 clicked_post_id=None  # Will be tracked separately on click
@@ -408,7 +420,7 @@ async def discover_posts(
             method="GET",
             duration_ms=discovery_duration_ms,
             status_code=200,
-            user_id=str(current_user.id)
+            user_id=str(current_user["id"])
         )
 
         return response_data
@@ -421,7 +433,7 @@ async def discover_posts(
             error_type="discovery_error",
             error_message=str(e),
             severity="high",
-            context={"user_id": str(current_user.id), "goal_count": len(goal_descriptions)}
+            context={"user_id": str(current_user["id"]), "goal_count": len(goal_descriptions)}
         )
 
         raise HTTPException(
@@ -438,7 +450,7 @@ async def discover_posts(
 )
 async def track_post_view(
     post_id: UUID,
-    current_user: User = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ) -> None:
     """
     Track when user views/clicks a discovered post.
@@ -463,7 +475,7 @@ async def track_post_view(
     goals = await zerodb_client.query_rows(
         table_name="goals",
         filter={
-            "user_id": str(current_user.id),
+            "user_id": str(current_user["id"]),
             "is_active": True
         }
     )
@@ -472,12 +484,12 @@ async def track_post_view(
     # Track discovery interaction with click feedback
     try:
         await rlhf_service.track_discovery_interaction(
-            user_id=current_user.id,
+            user_id=current_user["id"],
             user_goals=goal_descriptions,
             shown_posts=[post_id],
             clicked_post_id=post_id
         )
-        logger.info(f"Tracked post view: user={current_user.id}, post={post_id}")
+        logger.info(f"Tracked post view: user={current_user['id']}, post={post_id}")
     except RLHFServiceError as e:
         # Don't fail the request if RLHF tracking fails
         logger.warning(f"Failed to track post view: {e}")
@@ -493,7 +505,7 @@ async def track_post_view(
 )
 async def get_post(
     post_id: UUID,
-    current_user: User = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ) -> PostResponse:
     """
     Get a specific post by ID.
@@ -525,7 +537,7 @@ async def update_post(
     post_id: UUID,
     post_update: PostUpdate,
     background_tasks: BackgroundTasks,
-    current_user: User = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ) -> PostResponse:
     """
     Update an existing post.
@@ -548,7 +560,7 @@ async def update_post(
             # Block inappropriate content
             if not safety_check.is_safe:
                 logger.warning(
-                    f"Post update blocked for user {current_user.id}: "
+                    f"Post update blocked for user {current_user['id']}: "
                     f"flags {safety_check.content_flags}"
                 )
                 raise HTTPException(
@@ -559,7 +571,7 @@ async def update_post(
             # Warn about PII
             if safety_check.contains_pii:
                 logger.warning(
-                    f"Post update for user {current_user.id} contains PII: {safety_check.pii_types}"
+                    f"Post update for user {current_user['id']} contains PII: {safety_check.pii_types}"
                 )
 
         except HTTPException:
@@ -572,7 +584,7 @@ async def update_post(
         table_name="posts",
         filter={
             "id": str(post_id),
-            "user_id": str(current_user.id)
+            "user_id": str(current_user["id"])
         },
         limit=1
     )
@@ -639,7 +651,7 @@ async def update_post(
 )
 async def delete_post(
     post_id: UUID,
-    current_user: User = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ) -> None:
     """
     Delete a post.
@@ -654,7 +666,7 @@ async def delete_post(
         table_name="posts",
         filter={
             "id": str(post_id),
-            "user_id": str(current_user.id)
+            "user_id": str(current_user["id"])
         },
         limit=1
     )
