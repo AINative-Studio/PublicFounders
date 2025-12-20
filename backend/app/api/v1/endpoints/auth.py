@@ -39,7 +39,8 @@ async def initiate_linkedin_oauth(
 
     # Use state parameter to pass frontend redirect URI
     import base64
-    state = base64.urlsafe_b64encode((redirect_uri or "http://localhost:4000/auth/callback").encode()).decode()
+    default_callback = f"{settings.FRONTEND_URL}/auth/callback"
+    state = base64.urlsafe_b64encode((redirect_uri or default_callback).encode()).decode()
 
     # Build LinkedIn authorization URL
     auth_url = (
@@ -74,7 +75,7 @@ async def linkedin_oauth_callback(
     logger.info(f"Redirect URI configured: {settings.LINKEDIN_REDIRECT_URI}")
 
     # Decode frontend redirect URI from state
-    frontend_redirect = "http://localhost:4000/auth/callback"
+    frontend_redirect = f"{settings.FRONTEND_URL}/auth/callback"
     if state:
         try:
             frontend_redirect = base64.urlsafe_b64decode(state.encode()).decode()

@@ -68,6 +68,12 @@ class Settings(BaseSettings):
     EMBEDDING_MODEL: str = "BAAI/bge-small-en-v1.5"
     EMBEDDING_DIMENSIONS: int = 384
 
+    # Frontend URL for OAuth redirects
+    FRONTEND_URL: str = Field(
+        default="http://localhost:4000",
+        description="Frontend URL for OAuth callback redirects"
+    )
+
     # CORS - list of allowed origins
     CORS_ORIGINS: list[str] = [
         "http://localhost:3000",
