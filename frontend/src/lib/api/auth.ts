@@ -10,8 +10,10 @@ export const authApi = {
    * Redirects to LinkedIn authorization page
    */
   initiateLinkedIn: () => {
+    // Use configured redirect URI, or construct from current origin
     const redirectUri =
-      process.env.NEXT_PUBLIC_LINKEDIN_REDIRECT_URI || 'http://localhost:3000/auth/callback';
+      process.env.NEXT_PUBLIC_LINKEDIN_REDIRECT_URI ||
+      (typeof window !== 'undefined' ? `${window.location.origin}/auth/callback` : 'http://localhost:3000/auth/callback');
     const initiateUrl = `${API_BASE_URL}/api/v1${API_ENDPOINTS.auth.initiateLinkedIn}?redirect_uri=${encodeURIComponent(redirectUri)}`;
 
     if (typeof window !== 'undefined') {
